@@ -345,20 +345,48 @@ const myBrawler = () => playerById(app.myId)?.brawler ?? BRAWLER_IDS[0];
 const myName = () => ($('nameInput').value.trim() || local.get('bw_name') || 'Brawler').slice(0, 14);
 const inviteUrl = () => `${location.origin}${location.pathname}?room=${app.code}`;
 
+// Which screen you see depends on the room *and* on you: you can sit out a match in the lobby,
+// and results stay up until you tap Continue (like Brawl Stars), even if the room has moved on.
 function onRoom(room) {
   const prev = app.room?.state;
   const prevCode = app.room?.code;
   app.room = room;
-  if (room.state === 'lobby') {
-    showScreen('lobby');
-    renderLobby();
-    if (prevCode !== room.code) renderQr();
-  } else {
-    if (prev === 'lobby' || prev == null) { net.reset(); input.reset(); app.progress = null; renderProgress(); }
-    showScreen('game');
-    if (room.state === 'playing' && prev === 'countdown') net.fightShownAt = performance.now();
+  if (prevCode !== room.code) renderQr();
+  const me = playerById(app.myId);
+  const inPlay = room.state === 'countdown' || room.state === 'playing';
+  if (inPlay && (prev === 'lobby' || prev === 'ended' || prev == null)) {
+    net.reset();
+    input.reset();
+    app.progress = null;
+    renderProgress();
+    app.viewingResults = false;
+    app.sittingOut = Boolean(me?.out);
+    hideKo();
   }
+  if (room.state === 'ended' && prev !== 'ended' && me?.inMatch && !me.out && !app.sittingOut) {
+    app.viewingResults = true;
+    app.sittingOut = false;
+    hideKo();
+  }
+  if (room.state === 'playing' && prev === 'countdown') net.fightShownAt = performance.now();
+  if (me?.out && inPlay) app.sittingOut = true;
+  showScreen(app.viewingResults || (inPlay && !app.sittingOut) ? 'game' : 'lobby');
+  renderLobby();
   renderResults();
+}
+
+function hideKo() { $('koCard').classList.add('hidden'); }
+
+// Leave the current match (it keeps going) and wait in the lobby for the next one.
+function exitToLobby() {
+  $('leaveModal').classList.add('hidden');
+  hideKo();
+  const state = app.room?.state;
+  if (state === 'playing' || state === 'countdown') send({ t: 'forfeit' });
+  app.sittingOut = true;
+  app.viewingResults = false;
+  input.reset();
+  if (app.room) onRoom(app.room);
 }
 
 function buildCards() {
@@ -494,8 +522,13 @@ function renderLobby() {
   }
   $('playerCount').textContent = `${room.players.length}/${MAX_PLAYERS}`;
 
+  const inPlay = room.state === 'countdown' || room.state === 'playing';
+  const banner = inPlay ? `${mode.icon} A ${mode.name} match is in progress. You'll join the next one.`
+    : room.state === 'ended' ? `Match finished. ${isHost ? 'Hit Play to start the next one.' : 'Waiting for the host to start the next match…'}` : '';
+  $('matchBanner').textContent = banner;
+  $('matchBanner').classList.toggle('hidden', !banner);
   $('hostControls').classList.toggle('hidden', !isHost);
-  $('startBtn').disabled = room.players.length < MIN_PLAYERS;
+  $('startBtn').disabled = inPlay || room.players.length < MIN_PLAYERS;
   $('startBtn').textContent = `Play ${mode.name}`;
   $('addBotBtn').disabled = room.players.length >= MAX_PLAYERS;
   $('removeBotBtn').disabled = !room.players.some((p) => p.bot);
@@ -507,7 +540,7 @@ function renderLobby() {
 
 function renderResults() {
   const room = app.room;
-  const show = room?.state === 'ended' && room.results;
+  const show = Boolean(app.viewingResults && room?.results);
   $('results').classList.toggle('hidden', !show);
   if (!show) return;
   const mine = room.results.find((r) => r.id === app.myId);
@@ -538,8 +571,7 @@ function renderResults() {
     list.append(li);
   }
   const isHost = room.hostId === app.myId;
-  $('againBtn').classList.toggle('hidden', !isHost);
-  $('againHint').textContent = isHost ? '' : 'Waiting for the host… (back to lobby automatically in a few seconds)';
+  $('againHint').textContent = isHost ? 'Continue to the lobby to start the next match.' : 'The host starts the next match from the lobby.';
   if (net.resultSoundFor !== room.results) {
     net.resultSoundFor = room.results;
     if (mine) (mine.won ? sfx.win : sfx.lose)();
@@ -838,14 +870,23 @@ function handleEvent(e, now) {
 
 function onKnockout(e) {
   const feed = document.createElement('div');
-  feed.textContent = e.bounty && e.by ? `${nameOf(e.by)} took ${e.bounty}⭐ from ${nameOf(e.id)}`
+  feed.textContent = e.left ? `${nameOf(e.id)} left the match`
+    : e.bounty && e.by ? `${nameOf(e.by)} took ${e.bounty}⭐ from ${nameOf(e.id)}`
     : !e.by ? `${nameOf(e.id)} fell to the poison`
     : e.haunt ? `👻 ${nameOf(e.by)} haunted out ${nameOf(e.id)}`
       : `${nameOf(e.by)} knocked out ${nameOf(e.id)}`;
   $('killFeed').append(feed);
   setTimeout(() => feed.remove(), 4000);
   while ($('killFeed').children.length > 4) $('killFeed').firstChild.remove();
-  if (e.id === app.myId) net.killedBy = e.by || null;
+  if (e.id === app.myId) {
+    net.killedBy = e.by || null;
+    if (net.view?.mode === 'showdown' && app.room?.state === 'playing') {
+      const rank = (net.snaps[net.snaps.length - 1]?.alive ?? 0) + 1;
+      $('koTitle').textContent = `#${rank} · Knocked out!`;
+      $('koSub').textContent = e.by ? `by ${nameOf(e.by)}` : 'by the poison';
+      $('koCard').classList.remove('hidden');
+    }
+  }
 }
 
 // ---------- main loop ----------
@@ -1000,8 +1041,24 @@ $('joinForm').addEventListener('submit', (e) => {
 $('codeInput').addEventListener('input', (e) => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); });
 $('addBotBtn').addEventListener('click', () => send({ t: 'addBot' }));
 $('removeBotBtn').addEventListener('click', () => send({ t: 'removeBot' }));
-$('startBtn').addEventListener('click', () => send({ t: 'start' }));
-$('againBtn').addEventListener('click', () => send({ t: 'lobby' }));
+$('startBtn').addEventListener('click', () => {
+  if (app.room?.state === 'ended') send({ t: 'lobby' }); // skip the rest of the results screen
+  send({ t: 'start' });
+});
+$('againBtn').addEventListener('click', () => {
+  app.viewingResults = false;
+  if (app.room?.hostId === app.myId && app.room.state === 'ended') send({ t: 'lobby' });
+  if (app.room) onRoom(app.room);
+});
+$('exitBtn').addEventListener('click', () => {
+  const showdownAlive = net.view?.mode === 'showdown' && net.me.alive;
+  $('leaveText').textContent = `${showdownAlive ? 'You\'ll be counted as knocked out. ' : ''}The match keeps going for everyone else; you'll wait in the lobby and join the next one.`;
+  $('leaveModal').classList.remove('hidden');
+});
+$('leaveMatchBtn').addEventListener('click', exitToLobby);
+$('leaveCancel').addEventListener('click', () => $('leaveModal').classList.add('hidden'));
+$('koStay').addEventListener('click', hideKo);
+$('koExit').addEventListener('click', exitToLobby);
 $('leaveBtn').addEventListener('click', async () => {
   leaving = true;
   send({ t: 'leave' });

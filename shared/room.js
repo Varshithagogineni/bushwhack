@@ -172,6 +172,16 @@ export class Room {
         clearTimeout(p.dropTimer);
         this.removePlayer(p);
         break;
+      case 'forfeit':
+        // Leave the current match (it keeps going) and wait in the lobby for the next one.
+        if ((this.state === 'playing' || this.state === 'countdown') && p.inMatch && !p.forfeit) {
+          p.forfeit = true;
+          if (p.alive) this.eliminate(p, null);
+          p.ghost = false;
+          p.respawnAt = 0;
+          this.broadcastRoom();
+        }
+        break;
       case 'i': {
         if (!(p.alive || p.ghost) || this.state !== 'playing') break;
         let mx = Number(m.x) || 0, my = Number(m.y) || 0;
@@ -219,7 +229,7 @@ export class Room {
         inMatch: true, alive: true, ghost: false, x: spot.x, y: spot.y, hp: b.hp, maxHp: b.hp,
         ammo: MAX_AMMO, cooldown: 0, superCharge: 0, dash: null, hauntCd: 0, hauntAcc: 0, emote: -1, emoteUntil: 0,
         cubes: 0, kills: 0, rank: 0, inputs: [], ack: 0, lastHurt: -99, lastAttack: -99, revealUntil: -99, poisonAcc: 0,
-        gems: 0, stars: 2, score: 0, respawnAt: 0,
+        gems: 0, stars: 2, score: 0, respawnAt: 0, forfeit: false,
         deaths: 0, supersUsed: 0, cratesBroken: 0, gemsCollected: 0, maxGemsHeld: 0, starsStolen: 0, bestSteal: 0, hauntKOs: 0,
         aim: Math.atan2(CENTER - spot.y, CENTER - spot.x),
         ai: p.bot ? { strafe: 1, strafeT: 0, target: null, reactAt: 0, wp: null, wpT: 0, unstuckT: 0, ux: 0, uy: 0, lx: 0, ly: 0 } : null,
@@ -320,7 +330,7 @@ export class Room {
 
     if (this.rules.respawn) {
       for (const p of this.players.values()) {
-        if (p.inMatch && !p.alive && p.respawnAt && this.time >= p.respawnAt) this.respawn(p);
+        if (p.inMatch && !p.alive && !p.forfeit && p.respawnAt && this.time >= p.respawnAt) this.respawn(p);
       }
     }
     const fighters = [...this.players.values()].filter((p) => p.alive);
@@ -694,7 +704,8 @@ export class Room {
         p.gems = 0;
       }
     }
-    this.events.push({ k: 'ko', id: p.id, by: attacker ? attacker.id : 0, haunt: haunted ? 1 : 0, bounty, x: Math.round(p.x), y: Math.round(p.y) });
+    const left = p.forfeit || !p.connected ? 1 : 0; // walked out or dropped, rather than knocked out
+    this.events.push({ k: 'ko', id: p.id, by: attacker ? attacker.id : 0, haunt: haunted ? 1 : 0, bounty, left, x: Math.round(p.x), y: Math.round(p.y) });
   }
 
   haunt(p) {
@@ -812,6 +823,7 @@ export class Room {
       hostId: this.hostId,
       players: [...this.players.values()].map((p) => ({
         id: p.id, name: p.name, brawler: p.brawler, bot: p.bot, connected: p.connected, inMatch: p.inMatch, wins: p.wins, team: p.team,
+        out: Boolean(p.forfeit),
         trophies: p.account?.trophies ?? null,
       })),
       results: this.results,

@@ -442,3 +442,33 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
 .progress .newbadge { font: 400 1.2rem var(--hand); color: var(--terra-dark); animation: pop 0.5s ease-out; }
 @keyframes pop { from { transform: scale(0.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 @media (max-width: 520px) { .brawler-stats { grid-template-columns: 1fr; } }
+
+/* ---------- Leaving matches ---------- */
+.ko-card {
+  position: absolute;
+  left: 50%;
+  bottom: max(70px, calc(env(safe-area-inset-bottom) + 60px));
+  transform: translateX(-50%);
+  width: min(440px, calc(100% - 32px));
+  background: var(--paper);
+  border-radius: 16px;
+  padding: 14px 16px;
+  text-align: center;
+  pointer-events: auto;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+  animation: pop 0.35s ease-out;
+}
+.ko-title { font: 400 2.2rem/1 var(--hand); color: var(--terra); }
+.ko-sub { color: var(--ink-soft); margin: 4px 0 12px; }
+.ko-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ko-actions .btn { font-size: 1.15rem; padding: 10px; }
+.match-banner {
+  margin: 0;
+  background: var(--gold);
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font: 400 1.25rem var(--hand);
+  text-align: center;
+}
+@media (min-width: 960px) { .lobby .match-banner { grid-column: 1 / -1; } }

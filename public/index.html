@@ -67,6 +67,7 @@
 
   <!-- Lobby -->
   <main id="lobby" class="screen lobby hidden">
+    <p id="matchBanner" class="match-banner hidden"></p>
     <section class="panel stage-panel">
       <div class="lobby-head">
         <div class="room-code"><span class="label">Room</span><strong id="roomCode">----</strong></div>
@@ -107,6 +108,16 @@
 
     <button id="leaveBtn" class="btn ghost small leave">Leave room</button>
   </main>
+
+  <!-- Leave match? -->
+  <div id="leaveModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="leaveTitle">
+    <div class="panel modal-card">
+      <h2 id="leaveTitle">Leave this match?</h2>
+      <p id="leaveText" class="hint"></p>
+      <button id="leaveMatchBtn" class="btn primary big">Leave match</button>
+      <button id="leaveCancel" class="btn ghost small modal-close">Keep playing</button>
+    </div>
+  </div>
 
   <!-- Sign in / create account -->
   <div id="authModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="authTitle">
@@ -165,9 +176,18 @@
       <div id="centerMsg"></div>
       <div id="superHint"></div>
       <div id="spectateMsg"></div>
+      <div id="koCard" class="ko-card hidden">
+        <div id="koTitle" class="ko-title"></div>
+        <div id="koSub" class="ko-sub"></div>
+        <div class="ko-actions">
+          <button id="koStay" class="btn secondary">👻 Keep playing as ghost</button>
+          <button id="koExit" class="btn primary">Exit to lobby</button>
+        </div>
+      </div>
       <div id="hudButtons">
         <button id="muteBtn" class="hud-btn" aria-label="Mute sound">🔊</button>
         <button id="emoteBtn" class="hud-btn" aria-label="Emotes">😀</button>
+        <button id="exitBtn" class="hud-btn" aria-label="Leave match" title="Leave match">🚪</button>
         <div id="emoteTray" class="hidden"></div>
       </div>
     </div>
@@ -177,7 +197,7 @@
         <p id="resultSub" class="muted"></p>
         <div id="progress" class="progress hidden"></div>
         <ol id="resultList"></ol>
-        <button id="againBtn" class="btn primary big">Back to lobby</button>
+        <button id="againBtn" class="btn primary big">Continue</button>
         <p id="againHint" class="hint center"></p>
       </div>
     </div>
