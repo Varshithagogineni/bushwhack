@@ -31,6 +31,6 @@
     "albedo": "ground_albedo.webp",
     "mask": "ground_mask.png",
     "min": -3,
-    "size": 36
+    "size": 46
   }
 }

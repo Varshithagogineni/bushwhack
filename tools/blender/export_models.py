@@ -496,9 +496,10 @@ def bake_ground(manifest):
     for o in list(sc.objects):
         bpy.data.objects.remove(o, do_unlink=True)
     sc.world.node_tree.nodes['Background'].inputs[1].default_value = 0
-    n, margin, ppb = 30, 3, 64
+    rows = L['game_map']()
+    n, margin, ppb = len(rows), 3, 48
     size = n + 2 * margin
-    mask_a, mask_b, _ = L['ground_masks'](n, margin, 24)
+    mask_a, mask_b, _ = L['ground_masks'](n, margin, 24, rows)
     gm = albedo_material(L['mask_image']('maskA', mask_a), L['mask_image']('maskB', mask_b))
     bpy.ops.mesh.primitive_plane_add(size=size, location=(n / 2, -n / 2, 0))
     plane = bpy.context.active_object

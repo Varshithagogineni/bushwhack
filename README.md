@@ -1,11 +1,17 @@
 # Bushwhack
 
-A real-time multiplayer battle royale for up to 6 players. Friends join from any phone or laptop with a 4-letter room code: no login, no install.
+A real-time multiplayer brawler for up to 6 players, with three Brawl Stars-style modes. Friends join from any phone or laptop with a 4-letter room code: no login, no install.
+
+## Modes
+
+- **☠ Showdown:** every brawler for themselves. Poison closes in from the edges after 30 seconds; last one standing wins. Knocked-out players come back as ghosts (Ghost Mode).
+- **💎 Gem Grab:** two teams. Gems spawn from the mine in the middle; a team holding 10+ gems (and more than the other team) for 15 seconds wins. Knocked-out players drop their gems and respawn at their base.
+- **⭐ Bounty:** free-for-all with respawns. Knocking someone out steals their stars (2 to 7, growing with your streak). Most stars after 2 minutes wins.
+
+The host picks the mode in the lobby; in Gem Grab, players can switch teams. The arena is a 40×40-tile island with stone walls, bushes, crates and ponds (ponds block walking but not shots).
 
 ## How to play
 
-- **Survive.** Last brawler alive wins the round.
-- **Poison closes in** from the edges after 20 seconds. Stay inside the circle.
 - **Bushes hide you** from anyone who isn't right next to you, until you shoot.
 - **Break crates** for power cubes: +400 health and +10% damage each. Knocked-out brawlers drop theirs too.
 - **Land hits to charge your Super** (the yellow ring under you), then unleash it.
