@@ -1,13 +1,14 @@
 import {
   DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES, MODES, MODE_IDS,
-  movePlayer, moveGhost, speedFactor, round2, inBush,
+  movePlayer, moveGhost, speedFactor, round2, inBush, isWallAt, clamp, PLAYER_RADIUS,
 } from '/shared/game.js';
+import { BADGES } from '/shared/badges.js';
 import { Input } from './input.js';
 import { Renderer, drawBrawler } from './render.js';
 import { art, loadArt, drawPortrait } from './assets.js';
 import { sfx, isMuted, setMuted } from './sfx.js';
 
-const INTERP_MS = 100; // render other players this far in the past so motion stays smooth
+const INTERP_MS = 80; // render other players this far in the past so motion stays smooth
 const CLIENT_COOLDOWN = 0.45;
 
 const $ = (id) => document.getElementById(id);
@@ -32,15 +33,151 @@ const app = {
 };
 
 const net = {
-  snaps: [], offset: null, events: [], pending: [], seq: 0, pred: null, err: { x: 0, y: 0 },
+  snaps: [], offset: null, events: [], pending: [], seq: 0, pred: null, err: { x: 0, y: 0 }, localProjs: [], rtt: null,
   me: { alive: false, ghost: false, ammo: MAX_AMMO, cubes: 0, su: 0, hcd: 0 }, cooldown: 0, lastState: null,
   killedBy: null, cam: { x: CENTER, y: CENTER }, aimAngle: 0, fightShownAt: 0, view: null,
   lastBeep: null, resultSoundFor: null, wasGhost: false,
   reset() {
     this.snaps = []; this.events = []; this.pending = []; this.pred = null; this.err = { x: 0, y: 0 };
-    this.killedBy = null; this.cooldown = 0; this.lastBeep = null; this.wasGhost = false;
+    this.killedBy = null; this.cooldown = 0; this.lastBeep = null; this.wasGhost = false; this.localProjs = [];
   },
 };
+
+// ---------- optional accounts ----------
+
+const account = { token: local.get('bw_auth'), profile: null };
+
+async function api(route, body) {
+  const res = await fetch(route, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', ...(account.token ? { Authorization: `Bearer ${account.token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
+  return data;
+}
+
+async function refreshAccount() {
+  if (account.token) {
+    try { account.profile = (await api('/api/me')).profile; } catch { signOutLocally(); }
+  }
+  renderAccount();
+}
+
+function signOutLocally() {
+  account.token = null;
+  account.profile = null;
+  local.del('bw_auth');
+}
+
+function renderAccount() {
+  const p = account.profile;
+  $('guestBar').classList.toggle('hidden', Boolean(p));
+  $('userBar').classList.toggle('hidden', !p);
+  $('nameField').classList.toggle('hidden', Boolean(p));
+  if (p) $('userChip').textContent = `👤 ${p.username} · 🏆 ${p.trophies}`;
+}
+
+let authMode = 'login';
+function openAuth(mode = 'login') {
+  authMode = mode;
+  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('selected', t.dataset.tab === mode);
+  $('authSubmit').textContent = mode === 'login' ? 'Sign in' : 'Create account';
+  $('authPass').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  $('authError').classList.add('hidden');
+  $('authModal').classList.remove('hidden');
+  setTimeout(() => $('authUser').focus(), 30);
+}
+
+let profileReturn = 'home';
+async function openProfile() {
+  if (!account.profile) return openAuth('login');
+  profileReturn = !$('lobby').classList.contains('hidden') ? 'lobby' : 'home';
+  await refreshAccount();
+  renderProfile(account.profile);
+  showScreen('profile');
+  try { renderLeaderboard((await api('/api/leaderboard')).top); } catch { /* offline: skip */ }
+}
+
+function tile(label, value) {
+  const d = document.createElement('div');
+  d.className = 'stat-tile';
+  d.append(Object.assign(document.createElement('b'), { textContent: value }), Object.assign(document.createElement('span'), { textContent: label }));
+  return d;
+}
+
+function renderProfile(p) {
+  if (!p) return;
+  const s = p.stats;
+  $('pName').textContent = p.username;
+  $('pTrophies').textContent = p.trophies;
+  const rate = s.matches ? Math.round((s.wins / s.matches) * 100) : 0;
+  $('pStats').replaceChildren(
+    tile('Matches', s.matches), tile('Wins', s.wins), tile('Losses', s.losses), tile('Win rate', `${rate}%`),
+    tile('Knockouts', s.kills), tile('Best streak', s.bestStreak),
+    tile(`${MODES.showdown.icon} Showdown wins`, s.byMode.showdown.wins), tile(`${MODES.gemgrab.icon} Gem Grab wins`, s.byMode.gemgrab.wins),
+    tile(`${MODES.bounty.icon} Bounty wins`, s.byMode.bounty.wins), tile('Gems carried', s.gems), tile('Stars stolen', s.stars), tile('Supers used', s.supers),
+  );
+  $('pBrawlers').replaceChildren(...BRAWLER_IDS.map((id) => {
+    const b = s.byBrawler[id];
+    const d = document.createElement('div');
+    d.className = 'brawler-stat';
+    d.style.boxShadow = `inset 0 4px 0 ${BRAWLERS[id].color}`;
+    d.append(
+      Object.assign(document.createElement('div'), { className: 'bname', textContent: BRAWLERS[id].name }),
+      Object.assign(document.createElement('div'), { className: 'bline', textContent: `${b.wins} wins · ${b.played} played · ${b.kills} KOs` }),
+    );
+    return d;
+  }));
+  const earned = BADGES.filter((b) => p.badges[b.id]).length;
+  $('pBadgeCount').textContent = `${earned}/${BADGES.length} secured`;
+  $('pBadges').replaceChildren(...BADGES.map((b) => {
+    const got = Boolean(p.badges[b.id]);
+    const d = document.createElement('div');
+    d.className = `badge ${got ? 'earned' : 'locked'}`;
+    d.append(
+      Object.assign(document.createElement('div'), { className: 'bicon', textContent: b.icon }),
+      Object.assign(document.createElement('div'), { className: 'bname', textContent: b.name }),
+      Object.assign(document.createElement('div'), { className: 'bdesc', textContent: got ? `Secured ${new Date(p.badges[b.id]).toLocaleDateString()}` : b.desc }),
+    );
+    if (!got && b.goal > 1) {
+      const v = Math.min(b.goal, b.value(s, p.trophies));
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.innerHTML = `<i style="width:${(v / b.goal) * 100}%"></i>`;
+      d.append(bar, Object.assign(document.createElement('div'), { className: 'bdesc', textContent: `${v} / ${b.goal}` }));
+    }
+    return d;
+  }));
+}
+
+function renderLeaderboard(top) {
+  $('leaderboard').replaceChildren(...top.map((row, i) => {
+    const li = document.createElement('li');
+    if (row.username === account.profile?.username) li.classList.add('me');
+    li.append(
+      Object.assign(document.createElement('span'), { className: 'pos', textContent: `#${i + 1}` }),
+      Object.assign(document.createElement('span'), { className: 'who', textContent: row.username }),
+      Object.assign(document.createElement('span'), { textContent: `🏆 ${row.trophies}` }),
+    );
+    return li;
+  }));
+}
+
+function renderProgress() {
+  const box = $('progress');
+  const pr = app.progress;
+  box.classList.toggle('hidden', !pr);
+  if (!pr) return;
+  const delta = Object.assign(document.createElement('div'), {
+    className: `delta ${pr.delta > 0 ? 'up' : pr.delta < 0 ? 'down' : ''}`,
+    textContent: `${pr.delta > 0 ? '+' : ''}${pr.delta} 🏆 · ${pr.trophies} total`,
+  });
+  box.replaceChildren(delta, ...pr.newBadges.map((b) => Object.assign(document.createElement('div'), {
+    className: 'newbadge', textContent: `New badge secured: ${b.icon} ${b.name}`,
+  })));
+}
 
 const canvas = $('canvas');
 let renderer = new Renderer(canvas);
@@ -74,7 +211,7 @@ function connect() {
   ws.onopen = () => {
     app.retry = 0;
     $('net').classList.add('hidden');
-    if (app.code) send({ t: 'join', code: app.code, name: myName(), token: app.token });
+    if (app.code) send({ t: 'join', code: app.code, name: myName(), token: app.token, auth: account.token });
     else if (app.pending) send(app.pending);
     app.pending = null;
   };
@@ -115,6 +252,15 @@ function onMessage(m) {
     case 'snap':
       onSnap(m);
       break;
+    case 'progress':
+      app.progress = m;
+      if (account.profile) { account.profile.trophies = m.trophies; renderAccount(); }
+      renderProgress();
+      for (const b of m.newBadges) sfx.superReady();
+      break;
+    case 'pong':
+      net.rtt = net.rtt == null ? performance.now() - m.ts : net.rtt * 0.8 + (performance.now() - m.ts) * 0.2;
+      break;
     case 'error':
       toast(m.msg);
       if (m.fatal) {
@@ -133,6 +279,7 @@ function showScreen(name) {
   $('home').classList.toggle('hidden', name !== 'home');
   $('lobby').classList.toggle('hidden', name !== 'lobby');
   $('game').classList.toggle('hidden', name !== 'game');
+  $('profile').classList.toggle('hidden', name !== 'profile');
   document.body.style.overflow = name === 'game' ? 'hidden' : '';
   if (stage) (name === 'lobby' ? stage.start : stage.stop)();
 }
@@ -152,7 +299,7 @@ function onRoom(room) {
     renderLobby();
     if (prevCode !== room.code) renderQr();
   } else {
-    if (prev === 'lobby' || prev == null) { net.reset(); input.reset(); }
+    if (prev === 'lobby' || prev == null) { net.reset(); input.reset(); app.progress = null; renderProgress(); }
     showScreen('game');
     if (room.state === 'playing' && prev === 'countdown') net.fightShownAt = performance.now();
   }
@@ -233,7 +380,8 @@ function playerRow(p, room) {
   who.textContent = `${p.name} · ${BRAWLERS[p.brawler].name}`;
   li.append(dot, who);
   const tag = (text, cls) => li.append(Object.assign(document.createElement('span'), { className: `tag ${cls}`, textContent: text }));
-  if (p.wins) tag(`🏆 ${p.wins}`, 'wins');
+  if (p.trophies != null) tag(`🏆 ${p.trophies}`, 'wins');
+  if (p.wins) tag(`${p.wins}W`, '');
   if (p.id === app.myId) tag('YOU', 'you');
   if (p.id === room.hostId) tag('HOST', 'host');
   if (!p.connected && !p.bot) tag('offline', '');
@@ -478,7 +626,8 @@ function tryFire(intent) {
   net.aimAngle = aim.angle;
   net.cooldown = CLIENT_COOLDOWN;
   net.me.ammo -= 1;
-  send({ t: 'f', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist) });
+  send({ t: 'f', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist), l: lead() });
+  spawnLocalShots(aim.angle, aim.dist, false);
 }
 
 function trySuper(intent) {
@@ -487,7 +636,60 @@ function trySuper(intent) {
   if (!aim) return;
   net.aimAngle = aim.angle;
   net.me.su = 0;
-  send({ t: 's', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist) });
+  send({ t: 's', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist), l: lead() });
+  spawnLocalShots(aim.angle, aim.dist, true);
+}
+
+// One-way delay to the server; it fast-forwards our shots by this much.
+const lead = () => Math.round(Math.min(150, (net.rtt ?? 0) / 2));
+
+// Your own shots are drawn the instant you fire (the server's copies of them are hidden),
+// so attacking feels immediate even on a slow connection. The server still decides every hit.
+let localShotId = 0;
+function spawnLocalShots(angle, dist, isSuper) {
+  if (!net.pred) return;
+  const b = BRAWLERS[myBrawler()];
+  const spec = isSuper ? b.super : b;
+  const kind = isSuper ? b.super.kind : b.attack;
+  const { x, y } = net.pred;
+  if (kind === 'charge') return;
+  if (kind === 'lob' || kind === 'mega') {
+    const d = clamp(dist, isSuper ? 100 : 80, spec.range);
+    net.localProjs.push({ i: `L${++localShotId}`, k: 'l', sx: x, sy: y, tx: x + Math.cos(angle) * d, ty: y + Math.sin(angle) * d, p: 0, flight: spec.flight, r: spec.blast, big: isSuper ? 1 : 0 });
+    return;
+  }
+  const shots = kind === 'shotgun' ? b.pellets : kind === 'volley' ? b.super.shots : 1;
+  const spread = kind === 'shotgun' ? b.spread : kind === 'volley' ? b.super.spread : 0;
+  for (let i = 0; i < shots; i++) {
+    const a = angle + (shots > 1 ? (i / (shots - 1) - 0.5) * spread : 0);
+    net.localProjs.push({
+      i: `L${++localShotId}`, k: kind === 'shotgun' ? 'p' : kind === 'volley' ? 'v' : 'b',
+      x: x + Math.cos(a) * (PLAYER_RADIUS + 4), y: y + Math.sin(a) * (PLAYER_RADIUS + 4),
+      vx: Math.cos(a) * spec.projSpeed, vy: Math.sin(a) * spec.projSpeed, travelled: 0, range: spec.range, pierce: kind === 'volley',
+    });
+  }
+}
+
+function stepLocalShots(dt, now) {
+  const players = net.view?.players ?? [];
+  const teams = MODES[net.view?.mode]?.teams;
+  net.localProjs = net.localProjs.filter((pr) => {
+    if (pr.k === 'l') { pr.p += dt / pr.flight; return pr.p < 1; }
+    const speed = Math.hypot(pr.vx, pr.vy);
+    const steps = Math.max(1, Math.ceil((speed * dt) / 14));
+    for (let s = 0; s < steps; s++) {
+      pr.x += (pr.vx * dt) / steps;
+      pr.y += (pr.vy * dt) / steps;
+      pr.travelled += (speed * dt) / steps;
+      if (pr.travelled > pr.range) return false;
+      if (isWallAt(pr.x, pr.y)) { renderer.addEvent({ k: 'spark', x: pr.x, y: pr.y }, now); return false; }
+      for (const p of players) {
+        if (p.isMe || (teams && p.team === net.me.team)) continue;
+        if (!pr.pierce && Math.hypot(p.x - pr.x, p.y - pr.y) <= PLAYER_RADIUS + 10) return false;
+      }
+    }
+    return true;
+  });
 }
 
 function sendEmote(n) {
@@ -545,11 +747,11 @@ function buildView(now) {
   const selfGhost = latest.gmap.get(app.myId);
   if (net.me.ghost && selfGhost && selfShown) ghosts.push({ id: app.myId, ...selfShown, em: selfGhost.em, name: 'You', isMe: true });
 
-  const projs = b.projs.map((pb) => {
+  const projs = b.projs.filter((pb) => pb.o !== app.myId).map((pb) => {
     const pa = a.prmap.get(pb.i);
     if (!pa) return pb;
     return pb.k === 'l' ? { ...pb, p: lerp(pa.p, pb.p, k) } : { ...pb, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k) };
-  });
+  }).concat(net.localProjs);
 
   // Fire events (damage numbers, explosions, KOs, sounds) when the interpolated time reaches them.
   while (net.events.length && net.events[0].at <= rt) handleEvent(net.events.shift(), now);
@@ -604,6 +806,7 @@ function frame(now) {
   while (acc >= DT) { acc -= DT; stepInput(); }
   if ($('game').classList.contains('hidden')) return;
 
+  stepLocalShots(dtf, now);
   const decay = Math.exp(-dtf * 10);
   net.err.x *= decay;
   net.err.y *= decay;
@@ -730,14 +933,14 @@ function renderMute() {
 $('nameInput').value = local.get('bw_name') || '';
 $('createBtn').addEventListener('click', () => {
   saveName();
-  request({ t: 'create', name: myName(), token: app.token });
+  request({ t: 'create', name: myName(), token: app.token, auth: account.token });
 });
 $('joinForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const code = $('codeInput').value.trim().toUpperCase();
   if (code.length !== 4) return toast('Room codes are 4 letters.');
   saveName();
-  request({ t: 'join', code, name: myName(), token: app.token });
+  request({ t: 'join', code, name: myName(), token: app.token, auth: account.token });
 });
 $('codeInput').addEventListener('input', (e) => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); });
 $('addBotBtn').addEventListener('click', () => send({ t: 'addBot' }));
@@ -769,9 +972,44 @@ EMOTES.forEach((em, n) => {
   $('emoteTray').append(b);
 });
 
+$('signInBtn').addEventListener('click', () => openAuth('login'));
+$('profileBtn').addEventListener('click', openProfile);
+$('profileBack').addEventListener('click', () => showScreen(profileReturn));
+$('authClose').addEventListener('click', () => $('authModal').classList.add('hidden'));
+$('authModal').addEventListener('click', (e) => { if (e.target === $('authModal')) $('authModal').classList.add('hidden'); });
+for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => openAuth(t.dataset.tab));
+$('authForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('authSubmit').disabled = true;
+  try {
+    const res = await api(`/api/${authMode}`, { username: $('authUser').value, password: $('authPass').value });
+    account.token = res.token;
+    account.profile = res.profile;
+    local.set('bw_auth', res.token);
+    $('authModal').classList.add('hidden');
+    $('authPass').value = '';
+    renderAccount();
+    toast(authMode === 'signup' ? `Welcome, ${res.profile.username}! Your trophies and badges will be saved.` : `Welcome back, ${res.profile.username}!`);
+  } catch (err) {
+    $('authError').textContent = err.message;
+    $('authError').classList.remove('hidden');
+  } finally {
+    $('authSubmit').disabled = false;
+  }
+});
+$('signOutBtn').addEventListener('click', async () => {
+  try { await api('/api/logout', {}); } catch { /* already signed out */ }
+  signOutLocally();
+  renderAccount();
+  toast('Signed out. You can keep playing as a guest.');
+});
+// Measure round-trip time so shots can be lag-compensated.
+setInterval(() => send({ t: 'ping', ts: performance.now() }), 2000);
+
 renderMute();
 buildCards();
 buildModeCards();
+refreshAccount();
 loadArt().then((ok) => { if (ok) { buildCards(); renderLobby(); } });
 
 // Opened an invite link? Prefill the code. Refreshed mid-game? Rejoin the same seat.

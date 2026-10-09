@@ -44,11 +44,21 @@ Everything you see is modelled in code with Blender and rendered live in the bro
 /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P tools/blender/export_models.py -- public/models
 ```
 
+## Accounts, trophies and badges (optional)
+
+Guests can always play straight away. Signing in (username + password, stored as a salted scrypt hash) saves:
+trophies (Brawl Stars-style: up for wins and high placements, down for losses), wins/losses, knockouts and streaks per
+mode and per brawler, and 20 badges, all shown on the Profile page with a leaderboard.
+
+Accounts live in `data/accounts.json` locally. On hosts without a persistent disk (like Render's free tier), set
+`SUPABASE_URL` and `SUPABASE_SERVICE_KEY` and run `server/schema.sql` once in Supabase so accounts survive restarts.
+
 ## How it stays in sync
 
 - One Node.js server runs the authoritative simulation at 30 ticks/second and sends each player a snapshot every tick (about 400 bytes).
 - Your own brawler is predicted locally with the same movement code as the server (`shared/game.js`), then reconciled against the server, so controls feel instant.
-- Everyone else is drawn 100 ms in the past, interpolated between snapshots, so motion is smooth even on shaky connections.
+- Everyone else is drawn 80 ms in the past, interpolated between snapshots, so motion is smooth even on shaky connections.
+- Your own shots appear the instant you fire; the server fast-forwards them by your measured lag (capped at 150 ms), so what you saw hit is what counts.
 - The server decides who can see whom (bushes), so hidden players are never sent to opponents.
 - Dropped phones can rejoin the same seat within 30 seconds (refresh-safe).
 

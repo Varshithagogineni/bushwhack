@@ -2,3 +2,4 @@ node_modules
 .DS_Store
 public/assets/_tmp/
 public/models/_tmp/
+data/
