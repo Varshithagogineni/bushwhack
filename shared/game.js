@@ -34,24 +34,24 @@ export const EMOTES = ['👍', '😂', '😡', 'GG'];
 
 export const BRAWLERS = {
   brick: {
-    name: 'Brick', role: 'Tank', color: '#f08c3a', dark: '#a35314',
-    desc: 'Short-range shotgun blast. Huge health pool.',
+    name: 'Brick', role: 'Tank', color: '#b4553a', dark: '#7a3624',
+    desc: 'Straw-caped bruiser with a brass blunderbuss. Huge health.',
     hp: 5800, speed: 225, reload: 1.5,
     attack: 'shotgun', range: 320, pellets: 5, spread: 0.55, damage: 360, projSpeed: 1150,
     super: { kind: 'charge', name: 'Bulldoze', desc: 'Charge forward, smashing enemies and crates', range: 380, speed: 1150, damage: 1500, charge: 2600 },
     stats: { health: 5, range: 1, damage: 4 },
   },
   vex: {
-    name: 'Vex', role: 'Sharpshooter', color: '#4ea4ff', dark: '#1d5fa8',
-    desc: 'Long-range piercing shot. Fragile up close.',
+    name: 'Vex', role: 'Sharpshooter', color: '#3f7f8c', dark: '#24525b',
+    desc: 'Bamboo long-rifle. Deadly at range, fragile up close.',
     hp: 3000, speed: 255, reload: 1.35,
     attack: 'bullet', range: 760, damage: 1150, projSpeed: 1500,
     super: { kind: 'volley', name: 'Piercing Volley', desc: 'Five shots that pierce through enemies', shots: 5, spread: 0.32, range: 860, damage: 950, projSpeed: 1700, charge: 3000 },
     stats: { health: 2, range: 5, damage: 3 },
   },
   boom: {
-    name: 'Boom', role: 'Thrower', color: '#b56cf0', dark: '#6b2ea0',
-    desc: 'Lobs bombs over walls. Splash damage.',
+    name: 'Boom', role: 'Thrower', color: '#7a4f7a', dark: '#4e304e',
+    desc: 'Lobs clay-pot bombs over rocks. Splash damage.',
     hp: 3400, speed: 245, reload: 1.75,
     attack: 'lob', range: 560, damage: 1300, blast: 85, flight: 0.65,
     super: { kind: 'mega', name: 'Mega Bomb', desc: 'A huge bomb with a massive blast', range: 640, damage: 2300, blast: 150, flight: 0.9, charge: 2800 },

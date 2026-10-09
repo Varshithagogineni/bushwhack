@@ -83,6 +83,7 @@ def reset_scene(transparent=True, samples=48):
 
 
 MATS = {}
+OUTLINE = False  # the reference style has no ink outlines
 SEG = 32  # sphere segments; the glTF exporter lowers this for lighter real-time meshes
 
 
@@ -118,9 +119,9 @@ def outline_mat():
 NOISE_SPECS = {}  # name -> colours/pattern, so the glTF exporter can bake an equivalent image texture
 
 
-def noise_mat(name, c1, c2, scale=6.0, rough=0.7, detail=4.0, brick=None):
-    """Mottled two-colour material (stone, leaves, wood); optional brick/plank pattern."""
-    NOISE_SPECS[name] = dict(c1=c1, c2=c2, scale=scale, rough=rough, brick=brick)
+def noise_mat(name, c1, c2, scale=6.0, rough=0.7, detail=4.0, brick=None, kind=None):
+    """Mottled two-colour material (stone, leaves, wood, straw, cloth); optional brick pattern."""
+    NOISE_SPECS[name] = dict(c1=c1, c2=c2, scale=scale, rough=rough, brick=brick, kind=kind)
     if name in MATS:
         return MATS[name]
     m = bpy.data.materials.new(name)
@@ -182,7 +183,7 @@ def _finish(o, m, outline, smooth, bevel=0.0):
         if smooth:
             o.modifiers.new('Smooth', 'WEIGHTED_NORMAL')
     o.data.materials.append(m)
-    if outline:
+    if outline and OUTLINE:
         o.data.materials.append(outline_mat())
         s = o.modifiers.new('Outline', 'SOLIDIFY')
         s.thickness = outline
@@ -230,7 +231,7 @@ def dome(name, loc, scale, m, parent=None, cut=0.0, outline=0.012):
     o.location = loc
     o.scale = scale
     _finish(o, m, outline, True)
-    if outline:
+    if outline and OUTLINE:
         o.modifiers['Outline'].use_rim = False
     if parent:
         keep_parent(o, parent)
@@ -266,119 +267,140 @@ def keep_parent(child, parent):
 # ---------------------------------------------------------------- characters
 
 
+def shade(h, f):
+    """Lighten (f > 1) or darken (f < 1) a hex colour."""
+    h = h.lstrip('#')
+    return '#' + ''.join(f'{min(255, int(int(h[i:i + 2], 16) * f)):02x}' for i in (0, 2, 4))
+
+
+def shaggy(name, z_top, z_bot, r_top, r_bot, m, parent, loc=(0, 0), jag=0.05, teeth=14):
+    """A straw cape / skirt: a widening shell whose hem zig-zags like bundled straw."""
+    bpy.ops.mesh.primitive_cone_add(vertices=teeth * 2, radius1=r_bot, radius2=r_top, depth=z_top - z_bot,
+                                    location=(loc[0], loc[1], (z_top + z_bot) / 2), end_fill_type='NOTHING')
+    o = bpy.context.active_object
+    o.name = name
+    bm = bmesh.new()
+    bm.from_mesh(o.data)
+    for v in bm.verts:
+        if v.co.z < 0:
+            a = math.atan2(v.co.y, v.co.x)
+            v.co.z -= jag * (0.5 + 0.5 * math.cos(a * teeth))
+    bm.to_mesh(o.data)
+    bm.free()
+    _finish(o, m, 0, True)
+    o.data.materials[0].use_backface_culling = False
+    keep_parent(o, parent)
+    return o
+
+
 def build_body(c):
-    """Shared chibi human: legs and shoes on hip pivots, torso, head, eyes. Faces -Y."""
+    """Shared wanderer: straw kasa hat, dark mask with glowing eyes, scarf, rope-belted tunic. Faces -Y."""
     root = empty(f"{c['id']}_root")
     upper = empty('upper', parent=root)
-    hip = 0.3
+    hip = 0.32
     rig = {'root': root, 'upper': upper}
+    lr = c.get('leg_r', 0.068)
+    trousers = noise_mat(c['id'] + 'trousers', c['pants'], shade(c['pants'], 1.18), 30, kind='cloth')
+    wrap = noise_mat('legwrap', '#c9bb9a', '#e4d9bf', 30, kind='cloth')
+    boot = mat('boot', '#3b2b21', rough=0.85)
     for side, sx in (('L', 1), ('R', -1)):
-        piv = empty(f'leg{side}', (0.095 * sx, 0, hip), parent=root)
-        limb(f'thigh{side}', (0.095 * sx, 0, hip), (0.095 * sx, 0, 0.07), c.get('leg_r', 0.075), mat(c['id'] + 'pants', c['pants']), piv)
-        prim('sphere', f'shoe{side}', (0.095 * sx, -0.035, 0.055), (0.09, 0.13, 0.065), mat(c['id'] + 'shoe', c['shoe']), piv)
+        piv = empty(f'leg{side}', (0.09 * sx, 0, hip), parent=root)
+        limb(f'leg{side}m', (0.09 * sx, 0, hip), (0.09 * sx, 0, 0.07), lr, trousers, piv)
+        prim('cyl', 'wrap', (0.09 * sx, 0, 0.14), (lr * 1.12, lr * 1.12, 0.1), wrap, piv)
+        prim('sphere', 'boot', (0.09 * sx, -0.03, 0.05), (0.085, 0.12, 0.06), boot, piv)
         rig['leg' + side] = piv
-    tz = 0.52
-    tw, td, th = c['torso']
-    prim('sphere', 'torso', (0, 0, tz), (tw, td, th), mat(c['id'] + 'top', c['top']), upper)
-    prim('sphere', 'hips', (0, 0, hip + 0.05), (tw * 0.85, td * 0.9, 0.11), mat(c['id'] + 'pants', c['pants']), upper)
+    tw = c['tunic_r']
+    tunic = noise_mat(c['id'] + 'tunic', c['tunic'], shade(c['tunic'], 1.15), 30, kind='cloth')
+    prim('cone', 'skirt', (0, 0, 0.37), (tw * 1.15, tw * 0.98, 0.34), tunic, upper, r2=0.72, seg=24)
+    prim('sphere', 'chest', (0, 0, 0.6), (tw, tw * 0.8, 0.18), tunic, upper)
+    rope = noise_mat('rope', '#d8caa6', '#efe4c8', 40, kind='cloth')
+    prim('torus', 'belt', (0, 0, 0.5), (tw * 1.0, tw * 0.82, 0.5), rope, upper, minor=0.1)
+    prim('sphere', 'knot', (0.05, -tw * 0.82, 0.49), (0.035, 0.03, 0.035), rope, upper)
+    limb('tassel1', (0.05, -tw * 0.84, 0.48), (0.065, -tw * 0.86, 0.35), 0.014, rope, upper)
+    limb('tassel2', (0.04, -tw * 0.84, 0.48), (0.025, -tw * 0.87, 0.37), 0.014, rope, upper)
     hr = c['head_r']
-    hz = tz + th + hr * 0.78
-    skin = mat(c['id'] + 'skin', c['skin'], rough=0.5)
-    prim('sphere', 'head', (0, 0, hz), (hr, hr * 0.95, hr), skin, upper)
-    prim('sphere', 'neck', (0, 0, tz + th * 0.9), (0.07, 0.07, 0.06), skin, upper, outline=0)
+    hz = 0.6 + 0.18 + hr * 0.7
+    mask = mat('mask', '#2a2420', rough=0.9)
+    prim('sphere', 'head', (0, 0, hz), (hr, hr * 0.95, hr * 1.02), mask, upper)
+    glow = mat('eyeglow', '#ffd56a', emit=4.0, rough=0.4)
     for sx in (1, -1):
-        ear = prim('sphere', 'ear', (hr * 0.97 * sx, 0.02, hz), (0.05, 0.035, 0.065), skin, upper)
-        ear.name = 'ear'
-    eye = mat('eye', '#16121f', rough=0.3, spec=0.6)
-    white = mat('eyewhite', '#ffffff', rough=0.2, emit=0.4)
-    for sx in (1, -1):
-        prim('sphere', 'eye', (0.088 * sx, -hr * 0.9, hz + 0.0), (0.048, 0.03, 0.068), eye, upper, outline=0)
-        prim('sphere', 'glint', (0.088 * sx + 0.014, -hr * 0.98, hz + 0.03), (0.017, 0.01, 0.017), white, upper, outline=0)
-        if c.get('brows'):
-            prim('cube', 'brow', (0.09 * sx, -hr * 0.9, hz + 0.085), (0.075, 0.025, 0.022), mat(c['id'] + 'hair', c['hair']), upper,
-                 rot=(0, c['brows'] * sx, 0), outline=0)
-    prim('sphere', 'mouth', (0, -hr * 0.92, hz - 0.1), (0.045, 0.015, 0.018), mat('mouth', '#6b2a2a'), upper, outline=0)
-    prim('sphere', 'nose', (0, -hr * 0.99, hz - 0.045), (0.026, 0.02, 0.022), skin, upper, outline=0)
-    rig.update(hz=hz, hr=hr, tz=tz, tw=tw, td=td, th=th, skin=skin)
+        prim('sphere', 'eye', (0.068 * sx, -hr * 0.92, hz + 0.02), (0.032, 0.016, 0.024), glow, upper, seg=12, rings=6)
+    scarf = noise_mat(c['id'] + 'scarf', c['scarf'], shade(c['scarf'], 1.15), 30, kind='cloth')
+    prim('torus', 'scarf', (0, 0, hz - hr * 0.78), (hr * 0.95, hr * 0.9, 0.16), scarf, upper, minor=0.3)
+    prim('cube', 'scarftail', (0.07, -tw * 0.78, 0.62 - c.get('tail', 0.0) / 2), (0.075, 0.03, 0.2 + c.get('tail', 0.0)), scarf, upper,
+         rot=(0.12, 0, 0.12), bevel=0.012)
+    straw = noise_mat('straw', '#c49c5e', '#e2c48a', 20, kind='straw')
+    hb = hz + hr * 0.5
+    prim('cone', 'hat', (0, 0, hb + c['hat_h'] / 2), (c['hat_r'], c['hat_r'], c['hat_h']), straw, upper, seg=32)
+    prim('cyl', 'hatrim', (0, 0, hb), (c['hat_r'] * 1.01, c['hat_r'] * 1.01, 0.022), straw, upper, seg=32)
+    prim('torus', 'hatband', (0, 0, hb + c['hat_h'] * 0.52), (c['hat_r'] * 0.5, c['hat_r'] * 0.5, 0.3),
+         mat(c['id'] + 'band', c['band'], rough=0.6), upper, minor=0.1)
+    prim('sphere', 'hattop', (0, 0, hb + c['hat_h'] * 0.98), (0.03, 0.03, 0.03), mat(c['id'] + 'band', c['band']), upper, seg=10, rings=6)
+    rig.update(hz=hz, hr=hr, tw=tw, glove=mask, tunic=tunic, straw=straw)
     return rig
 
 
 def arm(rig, name, shoulder, hand, c, radius=0.058, parent=None):
-    m = mat(c['id'] + 'top', c['top'])
-    limb(name, shoulder, hand, radius, m, parent or rig['upper'])
-    prim('sphere', name + 'hand', hand, (0.062, 0.062, 0.062), rig['skin'], parent or rig['upper'])
+    limb(name, shoulder, hand, radius, rig['tunic'], parent or rig['upper'])
+    prim('sphere', name + 'hand', hand, (0.058, 0.058, 0.058), rig['glove'], parent or rig['upper'])
 
 
 def build_brick():
-    c = dict(id='brick', skin='#e3a074', top='#f08c3a', pants='#3b5ba5', shoe='#4a2f1e', hair='#5a341a',
-             torso=(0.27, 0.2, 0.2), head_r=0.235, leg_r=0.085, brows=-0.25)
+    c = dict(id='brick', tunic='#b4553a', pants='#3d4a63', scarf='#2f8f86', band='#2f8f86',
+             tunic_r=0.28, head_r=0.2, hat_r=0.47, hat_h=0.2, leg_r=0.08)
     r = build_body(c)
-    up, hz, hr, tz, tw = r['upper'], r['hz'], r['hr'], r['tz'], r['tw']
-    denim = mat('brickpants', c['pants'])
-    prim('cube', 'bib', (0, -0.18, tz - 0.05), (0.22, 0.05, 0.18), denim, up, bevel=0.02)
-    for sx in (1, -1):
-        prim('cube', 'strap', (0.12 * sx, -0.17, tz + 0.12), (0.05, 0.04, 0.16), denim, up, outline=0)
-    prim('sphere', 'beard', (0, -0.1, hz - 0.14), (0.2, 0.16, 0.12), mat('brickhair', c['hair'], rough=0.9), up)
-    hat = mat('hardhat', '#ffcd3c', rough=0.35, spec=0.5)
-    dome('hat', (0, 0.01, hz + 0.1), (hr * 1.1, hr * 1.1, hr * 0.95), hat, up)
-    prim('cyl', 'brim', (0, -0.03, hz + 0.1), (hr * 1.3, hr * 1.32, 0.03), hat, up)
-    prim('cube', 'ridge', (0, 0.01, hz + 0.3), (0.06, hr * 1.6, 0.05), hat, up, bevel=0.015, outline=0)
-    gz = tz - 0.06
-    metal = mat('gunmetal', '#2b2b38', rough=0.35, metal=0.6, spec=0.6)
-    wood = mat('gunwood', '#8a5a2b', rough=0.6)
-    for sx in (1, -1):
-        limb('barrel', (0.035 * sx, -0.18, gz), (0.035 * sx, -0.66, gz + 0.02), 0.04, metal, up)
-    prim('cube', 'stock', (0, -0.08, gz - 0.02), (0.11, 0.24, 0.09), wood, up, bevel=0.02)
-    arm(r, 'armL', (tw + 0.02, 0, tz + 0.1), (0.07, -0.42, gz + 0.03), c, 0.07)
-    arm(r, 'armR', (-tw - 0.02, 0, tz + 0.1), (-0.06, -0.2, gz), c, 0.07)
+    up, tw = r['upper'], r['tw']
+    # Bundled straw cape over the shoulders makes him the big one.
+    shaggy('cape', 0.82, 0.5, 0.17, 0.37, r['straw'], up, loc=(0, 0.03), jag=0.07, teeth=16)
+    gz = 0.46
+    wood = noise_mat('gunwood', '#6e4a2c', '#8f6a45', 10, kind='wood')
+    brass = mat('brass', '#b8913a', rough=0.35, metal=0.7, spec=0.6)
+    prim('cube', 'stock', (0, -0.06, gz - 0.02), (0.1, 0.3, 0.08), wood, up, bevel=0.02)
+    limb('barrel', (0, -0.2, gz + 0.01), (0, -0.56, gz + 0.03), 0.038, brass, up)
+    prim('cone', 'muzzle', (0, -0.6, gz + 0.03), (0.075, 0.075, 0.1), brass, up, rot=(math.pi / 2, 0, 0), r2=0.45, seg=16)
+    arm(r, 'armL', (tw + 0.02, 0, 0.66), (0.07, -0.4, gz + 0.03), c, 0.07)
+    arm(r, 'armR', (-tw - 0.02, 0, 0.66), (-0.06, -0.16, gz), c, 0.07)
     return r
 
 
 def build_vex():
-    c = dict(id='vex', skin='#f3c9a5', top='#4ea4ff', pants='#2d2f45', shoe='#1d1d24', hair='#ff5fa2',
-             torso=(0.2, 0.15, 0.21), head_r=0.235, leg_r=0.068, brows=0.12)
+    c = dict(id='vex', tunic='#3f7f8c', pants='#4a3f36', scarf='#e6dcc4', band='#c8643b',
+             tunic_r=0.21, head_r=0.19, hat_r=0.37, hat_h=0.3, leg_r=0.064, tail=0.12)
     r = build_body(c)
-    up, hz, hr, tz, tw = r['upper'], r['hz'], r['hr'], r['tz'], r['tw']
-    hair = mat('vexhair', c['hair'], rough=0.45, spec=0.5)
-    dome('hairtop', (0, 0.0, hz + 0.06), (hr * 1.08, hr * 1.07, hr * 1.0), hair, up)
-    prim('sphere', 'hairback', (0, 0.08, hz), (hr * 1.0, hr * 0.85, hr * 0.95), hair, up)
-    prim('sphere', 'bangs', (0.05, -hr * 0.78, hz + 0.12), (0.17, 0.07, 0.07), hair, up, rot=(0, -0.35, 0))
-    for i, (y, z, s) in enumerate(((0.26, hz + 0.08, 0.1), (0.36, hz - 0.04, 0.085), (0.42, hz - 0.16, 0.07))):
-        prim('sphere', f'pony{i}', (0, y, z), (s, s, s * 1.2), hair, up)
-    prim('torus', 'band', (0, 0.0, hz + 0.13), (hr * 1.02, hr * 1.02, 0.25), mat('vexband', '#ffcd3c'), up, rot=(0.25, 0, 0), minor=0.12)
-    prim('sphere', 'collar', (0, 0.0, tz + 0.17), (0.17, 0.13, 0.06), mat('vexcollar', '#1d5fa8'), up)
-    gz = tz + 0.1
-    metal = mat('gunmetal', '#2b2b38', rough=0.35, metal=0.6, spec=0.6)
-    limb('rifle', (-0.05, 0.05, gz), (-0.05, -0.85, gz + 0.02), 0.032, metal, up)
-    prim('cyl', 'scope', (-0.05, -0.32, gz + 0.07), (0.035, 0.035, 0.2), mat('scope', '#59d0ff', rough=0.2, emit=0.6), up, rot=(math.pi / 2, 0, 0))
-    prim('cube', 'stock', (-0.05, 0.02, gz - 0.04), (0.06, 0.18, 0.09), mat('vexstock', '#1d5fa8'), up, bevel=0.015)
-    arm(r, 'armR', (-tw - 0.02, 0, tz + 0.1), (-0.06, -0.12, gz - 0.02), c)
-    arm(r, 'armL', (tw + 0.02, 0, tz + 0.1), (-0.03, -0.46, gz), c)
+    up, tw = r['upper'], r['tw']
+    gz = 0.66
+    bamboo = noise_mat('bamboo', '#b99d5a', '#d9c07e', 12, kind='wood')
+    joint = mat('bamboojoint', '#8a7240', rough=0.6)
+    brass = mat('brass', '#b8913a', rough=0.35, metal=0.7, spec=0.6)
+    limb('rifle', (-0.05, 0.08, gz), (-0.05, -0.86, gz + 0.02), 0.03, bamboo, up)
+    for k in range(5):
+        y = 0.02 - k * 0.19
+        prim('cyl', 'joint', (-0.05, y, gz + 0.005 - k * 0.004), (0.036, 0.036, 0.022), joint, up, rot=(math.pi / 2, 0, 0), seg=12)
+    prim('cyl', 'tip', (-0.05, -0.86, gz + 0.02), (0.036, 0.036, 0.06), brass, up, rot=(math.pi / 2, 0, 0), seg=12)
+    arm(r, 'armR', (-tw - 0.02, 0, 0.66), (-0.06, -0.1, gz - 0.02), c)
+    arm(r, 'armL', (tw + 0.02, 0, 0.66), (-0.03, -0.44, gz), c)
     return r
 
 
 def build_boom():
-    c = dict(id='boom', skin='#a8693f', top='#b56cf0', pants='#3a2a55', shoe='#f2f2f2', hair='#2b1a12',
-             torso=(0.21, 0.16, 0.19), head_r=0.245, leg_r=0.07, brows=-0.1)
+    c = dict(id='boom', tunic='#7a4f7a', pants='#3a3346', scarf='#d9a441', band='#7ec8b8',
+             tunic_r=0.23, head_r=0.2, hat_r=0.36, hat_h=0.17, leg_r=0.066)
     r = build_body(c)
-    up, hz, hr, tz, tw = r['upper'], r['hz'], r['hr'], r['tz'], r['tw']
-    beanie = mat('beanie', '#6b2ea0', rough=0.85)
-    dome('beanie', (0, 0.01, hz + 0.09), (hr * 1.08, hr * 1.08, hr * 1.05), beanie, up)
-    prim('torus', 'cuff', (0, 0.0, hz + 0.1), (hr * 1.07, hr * 1.07, 0.35), beanie, up, minor=0.16)
-    prim('ico', 'pompom', (0, 0.02, hz + hr + 0.12), (0.07, 0.07, 0.07), mat('pompom', '#ffcd3c', rough=0.95), up)
-    gog = mat('goggle', '#ff9f1a', rough=0.15, emit=0.3, spec=0.8)
-    prim('cube', 'gogband', (0, -hr * 0.9, hz + 0.19), (0.26, 0.04, 0.035), mat('gogband', '#2b1a12'), up, rot=(-0.6, 0, 0), outline=0)
-    for sx in (1, -1):
-        prim('cyl', 'goggle', (0.075 * sx, -hr * 0.92, hz + 0.19), (0.058, 0.058, 0.045), gog, up, rot=(math.pi / 2 - 0.6, 0, 0))
-    prim('cube', 'satchel', (tw + 0.02, 0.02, tz - 0.12), (0.08, 0.15, 0.12), mat('satchel', '#7a4a22'), up, bevel=0.02)
-    limb('strap', (-tw * 0.7, -0.1, tz + 0.18), (tw * 0.9, -0.1, tz - 0.08), 0.02, mat('satchel', '#7a4a22'), up, outline=0)
-    hand = (-tw - 0.06, -0.05, tz + 0.42)
-    arm(r, 'armR', (-tw - 0.02, 0, tz + 0.1), hand, c)
-    prim('sphere', 'bomb', (hand[0], hand[1], hand[2] + 0.11), (0.11, 0.11, 0.11), mat('bomb', '#1e1e28', rough=0.3, spec=0.7), up)
-    limb('fuse', (hand[0], hand[1], hand[2] + 0.2), (hand[0] + 0.04, hand[1], hand[2] + 0.28), 0.012, mat('fuse', '#d9b98a'), up, outline=0)
-    prim('ico', 'spark', (hand[0] + 0.045, hand[1], hand[2] + 0.3), (0.035, 0.035, 0.035), mat('spark', '#ffb02e', emit=6), up, outline=0)
-    piv = empty('armLpiv', (tw + 0.02, 0, tz + 0.1), parent=up)
-    arm(r, 'armL', (tw + 0.02, 0, tz + 0.1), (tw + 0.08, 0, tz - 0.17), c, parent=piv)
+    up, tw = r['upper'], r['tw']
+    # Wicker basket of clay bombs on the back.
+    prim('cyl', 'basket', (0, 0.22, 0.62), (0.13, 0.13, 0.24), r['straw'], up, rot=(-0.25, 0, 0), seg=16)
+    clay = mat('clay', '#b5653a', rough=0.75)
+    for k, (x, z) in enumerate(((-0.04, 0.78), (0.05, 0.77))):
+        prim('sphere', f'pot{k}', (x, 0.25, z), (0.06, 0.06, 0.06), clay, up, seg=12, rings=8)
+    hand = (-tw - 0.05, -0.05, 1.0)
+    arm(r, 'armR', (-tw - 0.02, 0, 0.66), hand, c)
+    prim('sphere', 'bomb', (hand[0], hand[1], hand[2] + 0.1), (0.1, 0.1, 0.095), clay, up)
+    prim('cyl', 'neck', (hand[0], hand[1], hand[2] + 0.2), (0.04, 0.04, 0.04), clay, up, seg=12)
+    prim('cyl', 'cork', (hand[0], hand[1], hand[2] + 0.235), (0.03, 0.03, 0.03), mat('cork', '#c9a77a'), up, seg=10)
+    limb('fuse', (hand[0], hand[1], hand[2] + 0.25), (hand[0] + 0.04, hand[1], hand[2] + 0.32), 0.01, mat('fuse', '#d9b98a'), up)
+    prim('ico', 'spark', (hand[0] + 0.045, hand[1], hand[2] + 0.34), (0.035, 0.035, 0.035), mat('spark', '#ffb02e', emit=6), up)
+    piv = empty('armLpiv', (tw + 0.02, 0, 0.66), parent=up)
+    arm(r, 'armL', (tw + 0.02, 0, 0.66), (tw + 0.07, 0, 0.4), c, parent=piv)
     r['swingArm'] = piv
     return r
 
@@ -467,60 +489,92 @@ def render_characters(manifest):
 # ---------------------------------------------------------------- props
 
 
+def boulder(name, loc, size, seed, m, parent, moss=False):
+    """A soft, lumpy boulder with a flattened base; optional moss cap."""
+    bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=1)
+    o = bpy.context.active_object
+    o.name = name
+    bm = bmesh.new()
+    bm.from_mesh(o.data)
+    for v in bm.verts:
+        n = v.co.normalized()
+        f = 1 + 0.13 * math.sin(n.x * 4 + seed) * math.cos(n.y * 3.3 + seed * 1.7) + 0.07 * math.sin(n.z * 6 + seed * 2.1)
+        v.co *= f
+        if v.co.z < -0.35:
+            v.co.z = -0.35 + (v.co.z + 0.35) * 0.25
+    bm.to_mesh(o.data)
+    bm.free()
+    o.location = loc
+    o.scale = size
+    _finish(o, m, 0, True)
+    keep_parent(o, parent)
+    if moss:
+        cap = prim('ico', name + 'moss', (loc[0], loc[1], loc[2] + size[2] * 0.72), (size[0] * 0.75, size[1] * 0.72, size[2] * 0.32),
+                   noise_mat('moss', '#5f7f3a', '#8aa458', 9), parent, sub=2)
+        cap.rotation_euler.z = seed
+    return o
+
+
 def build_wall(v, stretch=True):
+    """Natural cover: boulder clusters and driftwood instead of stone blocks."""
     root = empty('wall')
-    sy = 1 / SIN if stretch else 1
-    stone = [noise_mat('stoneA', '#b3a487', '#d6c8a8', 5, brick=2.2),
-             noise_mat('stoneB', '#9a948a', '#c2bbab', 5, brick=2.2),
-             noise_mat('stoneC', '#c2a77f', '#e2cba2', 5, brick=2.2)][v]
-    prim('cube', 'block', (0, 0, 0.45), (0.98, 0.98 * sy, 0.9), stone, root, bevel=0.05, outline=0.012, smooth=False)
-    moss = noise_mat('moss', '#4f9a3a', '#7cc455', 9)
-    if True:
-        prim('cube', 'moss', (0, 0, 0.905), (0.9, 0.9 * sy, 0.05), moss, root, bevel=0.025, outline=0, smooth=False)
-    rng = random.Random(v)
-    for i in range(3 if v == 1 else 2):
-        prim('ico', 'pebble', (rng.uniform(-0.4, 0.4), -0.5 * sy - 0.04, 0.05), (0.09, 0.07 * sy, 0.06),
-             noise_mat('stoneB', '#9a948a', '#c2bbab', 5, brick=2.2), root, outline=0.008)
+    rock = noise_mat('rock', '#8d897f', '#c2bcae', 6, kind='rock')
+    if v == 0:
+        boulder('b0', (-0.12, 0.08, 0.3), (0.45, 0.42, 0.42), 1.0, rock, root, moss=True)
+        boulder('b1', (0.26, -0.18, 0.2), (0.3, 0.3, 0.28), 2.0, rock, root)
+        boulder('b2', (0.12, 0.33, 0.16), (0.26, 0.22, 0.22), 3.0, rock, root)
+    elif v == 1:
+        boulder('b0', (0.0, 0.0, 0.33), (0.52, 0.5, 0.44), 4.0, rock, root, moss=True)
+        boulder('b1', (-0.36, -0.3, 0.1), (0.16, 0.15, 0.13), 5.0, rock, root)
+    else:
+        boulder('b0', (0.18, 0.15, 0.27), (0.38, 0.38, 0.38), 6.0, rock, root, moss=True)
+        boulder('b1', (-0.28, 0.2, 0.17), (0.25, 0.26, 0.24), 7.0, rock, root)
+        drift = noise_mat('driftwood', '#a99a80', '#d2c5aa', 10, kind='wood')
+        limb('log', (-0.48, -0.18, 0.12), (0.46, -0.32, 0.13), 0.11, drift, root)
+        limb('branch', (0.1, -0.27, 0.16), (0.3, -0.05, 0.36), 0.035, drift, root)
+    if stretch:
+        root.scale.y = 1 / SIN
     return root
 
 
 def build_bush(v, stretch=True):
     root = empty('bush')
     sy = 1 / SIN if stretch else 1
-    leaf = noise_mat('leafA' if v != 2 else 'leafB', '#2f8f3a', '#56c04f', 7)
+    leaf = noise_mat('leafA' if v != 2 else 'leafB', '#46632e' if v != 2 else '#506a33', '#7d9a4e' if v != 2 else '#8ea65a', 7)
     rng = random.Random(10 + v)
     blobs = [(0, 0, 0.32, 0.36)] + [(math.cos(a) * 0.3, math.sin(a) * 0.3, 0.25, 0.27)
                                     for a in [i * 2 * math.pi / 6 + rng.uniform(-0.3, 0.3) for i in range(6)]]
     for i, (x, y, z, s) in enumerate(blobs):
         s *= rng.uniform(0.9, 1.1)
-        prim('ico', f'leaf{i}', (x, y * sy, z), (s, s * sy, s * 0.85), leaf, root, sub=3, outline=0.012)
+        prim('ico', f'leaf{i}', (x, y * sy, z), (s, s * sy, s * 0.85), leaf, root, sub=3)
     if v == 1:
         for i in range(7):
             a = rng.uniform(0, 2 * math.pi)
             prim('sphere', 'berry', (math.cos(a) * 0.28, math.sin(a) * 0.28 * sy, 0.42 + rng.uniform(-0.05, 0.12)),
-                 (0.045, 0.045 * sy, 0.045), mat('berry', '#ff4d6d', rough=0.3, spec=0.7), root, outline=0, seg=12, rings=8)
+                 (0.04, 0.04 * sy, 0.04), mat('berry', '#c4483f', rough=0.4, spec=0.6), root, seg=12, rings=8)
     if v == 2:
         for i in range(6):
             a = rng.uniform(0, 2 * math.pi)
             prim('sphere', 'flower', (math.cos(a) * 0.3, math.sin(a) * 0.3 * sy, 0.45 + rng.uniform(-0.05, 0.1)),
-                 (0.05, 0.05 * sy, 0.025), mat('bloom', '#fff3a8', rough=0.5, emit=0.2), root, outline=0, seg=12, rings=8)
+                 (0.05, 0.05 * sy, 0.025), mat('bloom', '#f3ead2', rough=0.6), root, seg=12, rings=8)
     return root
 
 
 def build_crate(stretch=True):
     root = empty('crate')
     sy = 1 / SIN if stretch else 1
-    wood = noise_mat('plank', '#a56a33', '#c98d4e', 4, brick=None)
-    dark = mat('plankdark', '#6e4319', rough=0.7)
+    wood = noise_mat('plank', '#86653f', '#ad8a5c', 4, kind='planks')
+    dark = mat('plankdark', '#5a4330', rough=0.8)
+    rope = noise_mat('rope', '#d8caa6', '#efe4c8', 40, kind='cloth')
     s = 0.84
     prim('cube', 'box', (0, 0, s / 2), (s, s * sy, s), wood, root, bevel=0.03, smooth=False)
-    for z in (0.04, s - 0.04):
-        prim('cube', 'bandF', (0, -s * sy / 2 - 0.005, z), (s + 0.02, 0.04, 0.08), dark, root, outline=0, smooth=False)
-    for x in (-s / 2 + 0.06, s / 2 - 0.06):
-        prim('cube', 'post', (x, -s * sy / 2 - 0.005, s / 2), (0.08, 0.04, s), dark, root, outline=0, smooth=False)
-    prim('cube', 'diag', (0, -s * sy / 2 - 0.01, s / 2), (0.08, 0.04, s * 1.25), dark, root, rot=(0, 0.8, 0), outline=0, smooth=False)
-    prim('cube', 'gem', (0, 0, s + 0.06), (0.22, 0.22 * sy, 0.22), mat('cubeglow', '#38e07b', emit=1.4, rough=0.2),
-         root, rot=(0.6, 0.6, 0.3), outline=0.01, smooth=False)
+    for z in (0.05, s - 0.05):
+        prim('cube', 'band', (0, 0, z), (s + 0.02, s * sy + 0.02, 0.07), dark, root, smooth=False)
+    # Cross-strapped rope over the lid and down the sides.
+    prim('cube', 'strapA', (0, 0, s / 2), (s + 0.025, 0.07 * sy, s + 0.025), rope, root, smooth=False)
+    prim('cube', 'strapB', (0, 0, s / 2), (0.07, s * sy + 0.025, s + 0.025), rope, root, smooth=False)
+    prim('cube', 'gem', (0, 0, s + 0.07), (0.2, 0.2 * sy, 0.2), mat('cubeglow', '#5fc9a6', emit=0.5, rough=0.2),
+         root, rot=(0.6, 0.6, 0.3), smooth=False)
     return root
 
 
@@ -839,7 +893,7 @@ def render_hero(manifest):
     sc = bpy.context.scene
     bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=3.2, depth=0.4, location=(0, 0.6, -0.2))
     island = bpy.context.active_object
-    _finish(island, noise_mat('herograss', '#4fa63f', '#79c957', 2), 0.02, True)
+    _finish(island, noise_mat('herograss', '#6a8a40', '#97ad62', 2), 0.02, True)
     for (x, y, v) in ((-1.9, 1.6, 0), (1.9, 1.7, 2), (0.0, 2.4, 1), (-2.6, 0.2, 1), (2.6, 0.3, 0)):
         b = build_bush(v, stretch=False)
         b.location = (x, y, 0)
