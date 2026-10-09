@@ -32,6 +32,12 @@ export const GHOST_SPEED = 300;
 export const HAUNT = { radius: 85, life: 3, cooldown: 5, slow: 0.5, dps: 220 };
 export const EMOTES = ['👍', '😂', '😡', 'GG'];
 export const RESPAWN_TIME = 3;
+
+// Knockback physics: impulses add velocity that decays each step; walls stop it (no bouncing players).
+export const KB = { decay: 0.86, max: 1400, stop: 20, dashArmor: 0.25, showdownScale: 0.75 };
+// Loose items (gems, power cubes) fly out, slow down and bounce off walls; they can only be picked up once settled.
+export const ITEM = { decay: 0.9, bounce: 0.45, settled: 60, launchMin: 220, launchMax: 380 };
+export const SWAP_TIME = 0.35;
 export const GEM = { every: 6, toWin: 10, countdown: 15, pickup: 44 };
 
 // Game modes, Brawl Stars style. Teams are 0 (blue) and 1 (red).
@@ -56,7 +62,9 @@ export const BRAWLERS = {
     name: 'Brick', role: 'Tank', color: '#b4553a', dark: '#7a3624',
     desc: 'Straw-caped bruiser with a brass blunderbuss. Huge health.',
     hp: 5800, speed: 225, reload: 1.5,
-    attack: 'shotgun', range: 320, pellets: 5, spread: 0.55, damage: 360, projSpeed: 1150,
+    weapon: 'Blunderbuss', icon: '💥',
+    attack: 'shotgun', range: 320, pellets: 5, spread: 0.55, damage: 360, projSpeed: 1150, knock: 40,
+    alt: { weapon: 'Haymaker', icon: '👊', attack: 'melee', range: 136, arc: 0.87, damage: 2000, windup: 0.12, knock: 420, reload: 1.1 },
     super: { kind: 'charge', name: 'Bulldoze', desc: 'Charge forward, smashing enemies and crates', range: 380, speed: 1150, damage: 1500, charge: 2600 },
     stats: { health: 5, range: 1, damage: 4 },
   },
@@ -64,7 +72,9 @@ export const BRAWLERS = {
     name: 'Vex', role: 'Sharpshooter', color: '#3f7f8c', dark: '#24525b',
     desc: 'Bamboo long-rifle. Deadly at range, fragile up close.',
     hp: 3000, speed: 255, reload: 1.35,
-    attack: 'bullet', range: 760, damage: 1150, projSpeed: 1500,
+    weapon: 'Bamboo Rifle', icon: '🎯',
+    attack: 'bullet', range: 760, damage: 1150, projSpeed: 1500, knock: 120,
+    alt: { weapon: 'Fan Bolts', icon: '🪶', attack: 'shotgun', pellets: 3, spread: 0.3, range: 400, damage: 560, projSpeed: 1300, knock: 60 },
     super: { kind: 'volley', name: 'Piercing Volley', desc: 'Five shots that pierce through enemies', shots: 5, spread: 0.32, range: 860, damage: 950, projSpeed: 1700, charge: 3000 },
     stats: { health: 2, range: 5, damage: 3 },
   },
@@ -72,12 +82,20 @@ export const BRAWLERS = {
     name: 'Boom', role: 'Thrower', color: '#7a4f7a', dark: '#4e304e',
     desc: 'Lobs clay-pot bombs over rocks. Splash damage.',
     hp: 3400, speed: 245, reload: 1.75,
-    attack: 'lob', range: 560, damage: 1300, blast: 85, flight: 0.65,
+    weapon: 'Clay Bomb', icon: '💣',
+    attack: 'lob', range: 560, damage: 1300, blast: 85, flight: 0.65, knock: 500,
+    alt: { weapon: 'Bowler', icon: '🎳', attack: 'bullet', range: 420, damage: 950, projSpeed: 650, hitR: 30, pierce: true, knock: 200, reload: 1.49 },
     super: { kind: 'mega', name: 'Mega Bomb', desc: 'A huge bomb with a massive blast', range: 640, damage: 2300, blast: 150, flight: 0.9, charge: 2800 },
     stats: { health: 3, range: 4, damage: 4 },
   },
 };
 export const BRAWLER_IDS = Object.keys(BRAWLERS);
+
+// The stats of the weapon a brawler currently holds (0 = main, 1 = alt). Health, speed and Super never change.
+export function weaponOf(id, slot) {
+  const b = BRAWLERS[id];
+  return slot ? { ...b, ...b.alt } : b;
+}
 
 // '.' floor, '#' wall, '*' bush, 'w' water (blocks walking, not shots).
 // One 20x20 quadrant, mirrored four ways so the map is fair from every spawn and for both teams.
@@ -183,18 +201,53 @@ export function resolveCircles(p, radius, solids) {
 }
 
 // Move one fixed tick. (mx, my) is the joystick vector, length <= 1. `solids` are crates.
+// Knockback velocity (p.kvx, p.kvy) is integrated in the same step, so host and client predict identically.
 export function movePlayer(p, mx, my, speed, solids = []) {
   const len = Math.hypot(mx, my);
-  if (len < 0.05) return;
-  if (len > 1) { mx /= len; my /= len; }
-  p.x += mx * speed * DT;
-  resolveWalls(p, PLAYER_RADIUS);
-  resolveCircles(p, PLAYER_RADIUS, solids);
-  p.y += my * speed * DT;
-  resolveWalls(p, PLAYER_RADIUS);
-  resolveCircles(p, PLAYER_RADIUS, solids);
-  resolveWalls(p, PLAYER_RADIUS);
+  if (len >= 0.05) {
+    if (len > 1) { mx /= len; my /= len; }
+    p.x += mx * speed * DT;
+    resolveWalls(p, PLAYER_RADIUS);
+    resolveCircles(p, PLAYER_RADIUS, solids);
+    p.y += my * speed * DT;
+    resolveWalls(p, PLAYER_RADIUS);
+    resolveCircles(p, PLAYER_RADIUS, solids);
+    resolveWalls(p, PLAYER_RADIUS);
+  }
+  applyKnockback(p, solids);
 }
+
+// Slide along walls: a blocked axis loses its velocity, the other keeps sliding.
+export function applyKnockback(p, solids = []) {
+  if (!p.kvx && !p.kvy) return;
+  const x0 = p.x;
+  p.x += p.kvx * DT;
+  resolveWalls(p, PLAYER_RADIUS);
+  resolveCircles(p, PLAYER_RADIUS, solids);
+  if (Math.abs(p.x - (x0 + p.kvx * DT)) > 0.5) p.kvx = 0;
+  const y0 = p.y;
+  p.y += p.kvy * DT;
+  resolveWalls(p, PLAYER_RADIUS);
+  resolveCircles(p, PLAYER_RADIUS, solids);
+  if (Math.abs(p.y - (y0 + p.kvy * DT)) > 0.5) p.kvy = 0;
+  p.kvx *= KB.decay;
+  p.kvy *= KB.decay;
+  if (Math.hypot(p.kvx, p.kvy) < KB.stop) { p.kvx = 0; p.kvy = 0; }
+}
+
+// Loose items: fly, slow down, bounce off walls and ponds.
+export function moveItem(it) {
+  if (!it.vx && !it.vy) return;
+  const solid = (x, y) => tileAt(x, y) === '#' || tileAt(x, y) === 'w';
+  const nx = it.x + it.vx * DT;
+  if (solid(nx, it.y) || nx < 16 || nx > WORLD - 16) it.vx = -it.vx * ITEM.bounce; else it.x = nx;
+  const ny = it.y + it.vy * DT;
+  if (solid(it.x, ny) || ny < 16 || ny > WORLD - 16) it.vy = -it.vy * ITEM.bounce; else it.y = ny;
+  it.vx *= ITEM.decay;
+  it.vy *= ITEM.decay;
+  if (Math.hypot(it.vx, it.vy) < 8) { it.vx = 0; it.vy = 0; }
+}
+export const itemSettled = (it) => Math.hypot(it.vx || 0, it.vy || 0) < ITEM.settled;
 
 // Ghosts drift through walls and crates; only the arena edge stops them.
 export function moveGhost(p, mx, my) {

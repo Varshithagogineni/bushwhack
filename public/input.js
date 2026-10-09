@@ -7,6 +7,12 @@ export function superButton() {
   return { x: innerWidth - 78, y: innerHeight - 200, r: 38 };
 }
 
+// The weapon-swap button sits just above it.
+export function swapButton() {
+  const sb = superButton();
+  return { x: sb.x, y: sb.y - 82, r: 30 };
+}
+
 export class Input {
   constructor(canvas) {
     this.canvas = canvas;
@@ -19,6 +25,8 @@ export class Input {
     this.onFire = () => {};
     this.onSuper = () => {};
     this.onEmote = () => {};
+    this.onSwap = () => {};
+    this.lastWheel = 0;
 
     addEventListener('keydown', (e) => {
       if (e.target instanceof HTMLInputElement) return;
@@ -27,7 +35,8 @@ export class Input {
         e.preventDefault();
         if (!e.repeat) this.onFire({ auto: true });
       }
-      if ((e.code === 'KeyE' || e.code === 'KeyQ') && !e.repeat) this.onSuper({ mouse: true });
+      if (e.code === 'KeyE' && !e.repeat) this.onSuper({ mouse: true });
+      if (e.code === 'KeyQ' && !e.repeat) this.onSwap();
       const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
       if (n >= 0 && !e.repeat) this.onEmote(n);
       if (e.code.startsWith('Arrow')) e.preventDefault();
@@ -36,6 +45,10 @@ export class Input {
     addEventListener('blur', () => this.reset());
 
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      if (performance.now() - this.lastWheel > 300) { this.lastWheel = performance.now(); this.onSwap(); }
+    }, { passive: false });
     canvas.addEventListener('pointerdown', (e) => this.down(e));
     canvas.addEventListener('pointermove', (e) => this.move_(e));
     canvas.addEventListener('pointerup', (e) => this.up(e));
@@ -61,6 +74,8 @@ export class Input {
     this.canvas.setPointerCapture?.(e.pointerId);
     const stick = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY };
     const sb = superButton();
+    const wb = swapButton();
+    if (Math.hypot(e.clientX - wb.x, e.clientY - wb.y) < wb.r * 1.3) { this.onSwap(); return; }
     if (e.clientX < innerWidth / 2) { if (!this.left) this.left = stick; }
     else if (!this.superStick && Math.hypot(e.clientX - sb.x, e.clientY - sb.y) < sb.r * 1.35) {
       this.superStick = { ...stick, ox: sb.x, oy: sb.y };

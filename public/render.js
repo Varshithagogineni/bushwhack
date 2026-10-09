@@ -1,5 +1,5 @@
-import { MAP, MAP_TILES, TILE, WORLD, CENTER, PLAYER_RADIUS, CRATE_R, BRAWLERS, MAX_AMMO, EMOTES, HAUNT } from '/shared/game.js';
-import { STICK_R, superButton } from './input.js';
+import { MAP, MAP_TILES, TILE, WORLD, CENTER, PLAYER_RADIUS, CRATE_R, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, weaponOf } from '/shared/game.js';
+import { STICK_R, superButton, swapButton } from './input.js';
 import { art, drawChar, drawProp, drawGround } from './assets.js';
 
 const R = PLAYER_RADIUS;
@@ -410,7 +410,7 @@ export class Renderer {
     // Bullets
     for (const p of v.projs) {
       if (p.k === 'l') continue;
-      const style = { b: ['#fff3a8', '#ffe14d', 9], p: ['#ffb347', '#ff8a00', 7], v: ['#c9f6ff', '#28c8ff', 10] }[p.k];
+      const style = { b: ['#fff3a8', '#ffe14d', 9], p: ['#ffb347', '#ff8a00', 7], v: ['#c9f6ff', '#28c8ff', 10], o: ['#d98a5a', '#b5653a', 15] }[p.k];
       ctx.fillStyle = style[0];
       ctx.shadowColor = style[1];
       ctx.shadowBlur = 14;
@@ -483,7 +483,7 @@ export class Renderer {
 
   drawAim(a) {
     const { ctx } = this;
-    const b = BRAWLERS[a.brawler];
+    const b = weaponOf(a.brawler, a.super ? 0 : a.weapon || 0);
     ctx.save();
     ctx.translate(a.x, a.y);
     ctx.fillStyle = a.super ? 'rgba(255,214,60,0.3)' : 'rgba(255,255,255,0.22)';
@@ -491,8 +491,8 @@ export class Renderer {
     ctx.lineWidth = 2;
     const kind = a.super ? b.super.kind : b.attack;
     const range = a.super ? b.super.range : b.range;
-    if (kind === 'shotgun' || kind === 'volley') {
-      const spread = kind === 'volley' ? b.super.spread : b.spread;
+    if (kind === 'shotgun' || kind === 'volley' || kind === 'melee') {
+      const spread = kind === 'volley' ? b.super.spread : kind === 'melee' ? b.arc * 2 : b.spread;
       ctx.beginPath();
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, range, a.angle - spread / 2, a.angle + spread / 2);
@@ -639,7 +639,7 @@ export class Renderer {
     ctx.fillRect(0, 0, this.w, this.h);
   }
 
-  drawSticks({ left, right, superStick, hint, ghost }, me) {
+  drawSticks({ left, right, superStick, hint, ghost, brawler, weapon }, me) {
     const { ctx } = this;
     const stick = (s, color) => {
       const dx = s.x - s.ox, dy = s.y - s.oy, d = Math.hypot(dx, dy) || 1;
@@ -654,6 +654,20 @@ export class Renderer {
     if (left) stick(left, 'rgba(120,200,255,0.8)');
     if (right) stick(right, ghost ? 'rgba(190,150,255,0.85)' : 'rgba(255,190,60,0.85)');
 
+    if (!ghost && me && brawler) {
+      // Weapon swap button: shows the weapon you'd switch TO.
+      const wb = swapButton();
+      ctx.fillStyle = 'rgba(40,28,18,0.55)';
+      ctx.strokeStyle = 'rgba(255,207,122,0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(wb.x, wb.y, wb.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.font = '22px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText(weaponOf(brawler, weapon ? 0 : 1).icon, wb.x, wb.y + 8);
+      ctx.font = '900 10px system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.fillText('SWAP', wb.x, wb.y + wb.r + 12);
+    }
     if (!ghost && me) {
       const sb = superButton();
       const su = me.su ?? 0;
