@@ -4,6 +4,7 @@ import {
 } from '/shared/game.js';
 import { Input } from './input.js';
 import { Renderer, drawBrawler } from './render.js';
+import { art, loadArt, drawPortrait } from './assets.js';
 import { sfx, isMuted, setMuted } from './sfx.js';
 
 const INTERP_MS = 100; // render other players this far in the past so motion stays smooth
@@ -151,8 +152,8 @@ function buildCards() {
     const icon = document.createElement('canvas');
     icon.width = icon.height = 112;
     const ictx = icon.getContext('2d');
-    ictx.scale(2, 2);
-    drawBrawler(ictx, 28, 30, id, 0.4);
+    if (art.ready) drawPortrait(ictx, id, 112, 112);
+    else { ictx.scale(2, 2); drawBrawler(ictx, 28, 30, id, 0.4); }
     const el = (cls, text) => Object.assign(document.createElement('div'), { className: cls, textContent: text });
     card.append(icon, el('name', b.name), el('role', b.role), el('desc', b.desc));
     for (const [label, val] of Object.entries(b.stats)) {
@@ -656,6 +657,7 @@ EMOTES.forEach((em, n) => {
 
 renderMute();
 buildCards();
+loadArt().then((ok) => { if (ok) { buildCards(); renderLobby(); } });
 
 // Opened an invite link? Prefill the code. Refreshed mid-game? Rejoin the same seat.
 const params = new URLSearchParams(location.search);

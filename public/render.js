@@ -1,5 +1,6 @@
 import { MAP, MAP_TILES, TILE, WORLD, CENTER, PLAYER_RADIUS, CRATE_R, BRAWLERS, MAX_AMMO, EMOTES, HAUNT } from '/shared/game.js';
 import { STICK_R, superButton } from './input.js';
+import { art, drawChar, drawProp, drawGround } from './assets.js';
 
 const R = PLAYER_RADIUS;
 const ME = '#3ccf6e';
@@ -210,6 +211,7 @@ export class Renderer {
     this.layers = buildLayers();
     this.effects = [];
     this.flashes = new Map(); // player id -> time hit
+    this.motion = new Map(); // player id -> last position, for walk cycles
     this.shakeAmt = 0;
     this.hurtAt = -1e9;
     this.resize();
@@ -240,11 +242,48 @@ export class Renderer {
     if (e.k === 'dmg') this.flashes.set(e.id, now);
   }
 
+  // Track who is moving so their walk cycle plays.
+  walkFrame(p, now) {
+    const m = this.motion.get(p.id);
+    if (!m) { this.motion.set(p.id, { x: p.x, y: p.y, t: now, until: 0 }); return 0; }
+    if (Math.hypot(p.x - m.x, p.y - m.y) > 0.6) m.until = now + 120;
+    m.x = p.x; m.y = p.y; m.t = now;
+    return now < m.until ? Math.floor(now / 110) % 4 : 0;
+  }
+
+  drawPlayer(p, now, opts = {}) {
+    const { ctx } = this;
+    if (!art.ready) {
+      drawBrawler(ctx, p.x, p.y, p.brawler, p.aim, { ring: p.isMe ? ME : FOE, ...opts });
+      return;
+    }
+    const alpha = opts.alpha ?? 1;
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.3;
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.ellipse(p.x, p.y + 2, R * 0.9, R * 0.42, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = alpha;
+    if (opts.ring !== false) {
+      ctx.strokeStyle = p.isMe ? ME : FOE;
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.ellipse(p.x, p.y + 2, R * 1.05, R * 0.5, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    const frame = opts.frame ?? this.walkFrame(p, now);
+    drawChar(ctx, p.brawler, p.x, p.y, p.aim, frame);
+    if (opts.flash > 0) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = alpha * opts.flash * 0.85;
+      drawChar(ctx, p.brawler, p.x, p.y, p.aim, frame);
+    }
+    ctx.restore();
+  }
+
   draw(v, now) {
     const { ctx, scale } = this;
     const t = now / 1000;
+    const A = art.ready;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.fillStyle = '#2b1d12';
+    ctx.fillStyle = A ? art.sea : '#2b1d12';
     ctx.fillRect(0, 0, this.w, this.h);
 
     this.shakeAmt *= 0.88;
@@ -256,7 +295,8 @@ export class Renderer {
     ctx.translate(this.w / 2 + sx, this.h / 2 + sy);
     ctx.scale(scale, scale);
     ctx.translate(-v.cam.x, -v.cam.y);
-    ctx.drawImage(this.layers.ground, 0, 0);
+    if (A) drawGround(ctx);
+    else ctx.drawImage(this.layers.ground, 0, 0);
 
     // Haunts (on the ground)
     for (const h of v.haunts) {
@@ -276,25 +316,6 @@ export class Renderer {
       ctx.globalAlpha = 1;
     }
 
-    // Power cubes
-    for (const c of v.cubes) {
-      const bob = Math.sin(t * 3 + c.i) * 3;
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
-      ctx.beginPath(); ctx.ellipse(c.x, c.y + 14, 14, 5, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#2ecc71';
-      ctx.strokeStyle = '#167a3f';
-      ctx.lineWidth = 3;
-      roundRect(ctx, c.x - 13, c.y - 15 + bob, 26, 26, 5, true);
-      ctx.fillStyle = '#eaffdf';
-      ctx.font = 'bold 18px system-ui';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('⚡', c.x, c.y - 1 + bob);
-      ctx.textBaseline = 'alphabetic';
-    }
-
-    for (const c of v.crates) drawCrate(ctx, c);
-
     // Lob landing zones
     for (const p of v.projs) {
       if (p.k !== 'l') continue;
@@ -308,16 +329,73 @@ export class Renderer {
 
     if (v.aim) this.drawAim(v.aim);
 
-    // Brawlers
-    const sorted = [...v.players].sort((a, b) => a.y - b.y);
-    for (const p of sorted) {
-      if (p.dash) {
-        for (let i = 1; i <= 3; i++) {
-          drawBrawler(ctx, p.x - Math.cos(p.aim) * i * 22, p.y - Math.sin(p.aim) * i * 22, p.brawler, p.aim, { alpha: 0.25 / i });
-        }
+    // Everything with height is depth-sorted by where it touches the ground,
+    // so you can walk behind a wall and in front of it.
+    const halfW = this.w / 2 / scale + 160, halfH = this.h / 2 / scale + 200;
+    const onScreen = (x, y) => Math.abs(x - v.cam.x) < halfW && Math.abs(y - v.cam.y) < halfH;
+    const me = v.players.find((p) => p.isMe);
+    const items = [];
+    if (A) {
+      for (const w of art.walls) if (onScreen(w.x, w.y)) items.push([w.key, () => drawProp(ctx, `wall${w.v}`, w.x, w.y)]);
+      for (const b of art.bushes) {
+        if (!onScreen(b.x, b.y)) continue;
+        const mine = me && Math.floor(me.x / 64) === b.c && Math.floor(me.y / 64) === b.r;
+        items.push([b.key - 1, () => {
+          if (mine) ctx.globalAlpha = 0.55;
+          drawProp(ctx, `bush${b.v}`, b.x, b.y);
+          ctx.globalAlpha = 1;
+        }]);
       }
-      drawBrawler(ctx, p.x, p.y, p.brawler, p.aim, { ring: p.isMe ? ME : FOE, flash: flashOf(p.id) });
     }
+    for (const c of v.cubes) {
+      const bob = Math.sin(t * 3 + c.i) * 3;
+      items.push([c.y, () => {
+        if (A) {
+          ctx.fillStyle = 'rgba(46,232,122,0.25)';
+          ctx.beginPath(); ctx.ellipse(c.x, c.y + 4, 16, 7, 0, 0, Math.PI * 2); ctx.fill();
+          drawProp(ctx, 'cube', c.x, c.y + bob);
+          return;
+        }
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath(); ctx.ellipse(c.x, c.y + 14, 14, 5, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#2ecc71';
+        ctx.strokeStyle = '#167a3f';
+        ctx.lineWidth = 3;
+        roundRect(ctx, c.x - 13, c.y - 15 + bob, 26, 26, 5, true);
+        ctx.fillStyle = '#eaffdf';
+        ctx.font = 'bold 18px system-ui';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('⚡', c.x, c.y - 1 + bob);
+        ctx.textBaseline = 'alphabetic';
+      }]);
+    }
+    for (const c of v.crates) {
+      items.push([c.y + CRATE_R, () => {
+        if (!A) return drawCrate(ctx, c);
+        ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        ctx.beginPath(); ctx.ellipse(c.x + 6, c.y + 10, 34, 16, 0, 0, Math.PI * 2); ctx.fill();
+        drawProp(ctx, 'crate', c.x, c.y);
+        if (c.h < 1) {
+          ctx.fillStyle = 'rgba(0,0,0,0.6)';
+          ctx.fillRect(c.x - 26, c.y - 72, 52, 8);
+          ctx.fillStyle = '#ffd34d';
+          ctx.fillRect(c.x - 25, c.y - 71, 50 * c.h, 6);
+        }
+      }]);
+    }
+    for (const p of v.players) {
+      items.push([p.y, () => {
+        if (p.dash) {
+          for (let i = 3; i >= 1; i--) {
+            this.drawPlayer({ ...p, x: p.x - Math.cos(p.aim) * i * 22, y: p.y - Math.sin(p.aim) * i * 22 }, now, { alpha: 0.25 / i, ring: false, frame: 1 });
+          }
+        }
+        this.drawPlayer(p, now, { flash: flashOf(p.id) });
+      }]);
+    }
+    items.sort((a, b) => a[0] - b[0]);
+    for (const [, drawIt] of items) drawIt();
 
     // Bullets
     for (const p of v.projs) {
@@ -326,14 +404,14 @@ export class Renderer {
       ctx.fillStyle = style[0];
       ctx.shadowColor = style[1];
       ctx.shadowBlur = 14;
-      ctx.beginPath(); ctx.arc(p.x, p.y, style[2], 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x, p.y - (A ? 22 : 0), style[2], 0, Math.PI * 2); ctx.fill();
       ctx.shadowBlur = 0;
     }
 
-    // Bushes cover everyone; players inside one are drawn faintly on top so you can still find yourself.
-    ctx.drawImage(this.layers.bush, 0, 0);
-    for (const p of sorted) {
-      if (p.bush) drawBrawler(ctx, p.x, p.y, p.brawler, p.aim, { alpha: p.isMe ? 0.6 : 0.4, ring: p.isMe ? ME : FOE });
+    // Players inside a bush are drawn faintly on top so you can still find yourself.
+    if (!A) ctx.drawImage(this.layers.bush, 0, 0);
+    for (const p of v.players) {
+      if (p.bush) this.drawPlayer(p, now, { alpha: p.isMe ? 0.6 : 0.4 });
     }
 
     // Bombs in the air
@@ -351,7 +429,13 @@ export class Renderer {
     }
 
     // Ghosts float above everything on the ground
-    for (const g of v.ghosts) drawGhost(ctx, g.x, g.y, t, g.isMe);
+    for (const g of v.ghosts) {
+      if (A) {
+        ctx.globalAlpha = g.isMe ? 0.8 : 0.6;
+        drawProp(ctx, 'ghost', g.x, g.y + Math.sin(t * 3 + g.x) * 5);
+        ctx.globalAlpha = 1;
+      } else drawGhost(ctx, g.x, g.y, t, g.isMe);
+    }
 
     this.drawEffects(now, true);
 
@@ -366,17 +450,18 @@ export class Renderer {
     ctx.beginPath(); ctx.arc(CENTER, CENTER, v.poison, 0, Math.PI * 2); ctx.stroke();
 
     // Name tags, health bars and emotes, above everything
-    for (const p of sorted) this.drawTag(p, v.me, t);
+    for (const p of v.players) this.drawTag(p, v.me, t);
     for (const g of v.ghosts) {
+      const gy = g.y - (A ? 64 : R + 12);
       ctx.font = 'bold 14px system-ui';
       ctx.textAlign = 'center';
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';
       ctx.fillStyle = '#d9ccff';
       const label = g.isMe ? 'You (ghost)' : `${g.name} 👻`;
-      ctx.strokeText(label, g.x, g.y - R - 12);
-      ctx.fillText(label, g.x, g.y - R - 12);
-      if (g.em != null) bubble(ctx, g.x, g.y - R - 30, EMOTES[g.em]);
+      ctx.strokeText(label, g.x, gy);
+      ctx.fillText(label, g.x, gy);
+      if (g.em != null) bubble(ctx, g.x, gy - 18, EMOTES[g.em]);
     }
     this.drawEffects(now, false);
     ctx.restore();
@@ -421,7 +506,7 @@ export class Renderer {
 
   drawTag(p, me, t) {
     const { ctx } = this;
-    const y = p.y - R - 20;
+    const y = p.y - (art.ready ? 82 : R + 20);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
     ctx.font = 'bold 15px system-ui';
@@ -452,7 +537,7 @@ export class Renderer {
     if (p.isMe && me) {
       const seg = 18, gap = 3, total = MAX_AMMO * seg + (MAX_AMMO - 1) * gap;
       for (let i = 0; i < MAX_AMMO; i++) {
-        const x = p.x - total / 2 + i * (seg + gap), yy = p.y + R + 14;
+        const x = p.x - total / 2 + i * (seg + gap), yy = p.y + (art.ready ? 18 : R + 14);
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
         ctx.fillRect(x, yy, seg, 6);
         ctx.fillStyle = '#ff9f1a';
@@ -462,9 +547,9 @@ export class Renderer {
       const su = me.su ?? 0;
       ctx.lineWidth = 5;
       ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-      ctx.beginPath(); ctx.ellipse(p.x, p.y + R * 0.75, R * 1.3, R * 0.6, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(p.x, p.y + (art.ready ? 2 : R * 0.75), R * 1.3, R * 0.6, 0, 0, Math.PI * 2); ctx.stroke();
       ctx.strokeStyle = su >= 1 ? `rgba(255,214,60,${0.7 + 0.3 * Math.sin(t * 10)})` : '#ffd23c';
-      ctx.beginPath(); ctx.ellipse(p.x, p.y + R * 0.75, R * 1.3, R * 0.6, 0, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * su); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(p.x, p.y + (art.ready ? 2 : R * 0.75), R * 1.3, R * 0.6, 0, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * su); ctx.stroke();
     }
     if (p.em != null) bubble(ctx, p.x, y - 34, EMOTES[p.em]);
   }
