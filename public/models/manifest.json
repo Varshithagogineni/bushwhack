@@ -1,0 +1,35 @@
+{
+  "characters": [
+    "brick",
+    "vex",
+    "boom"
+  ],
+  "props": [
+    "wall0",
+    "bush0",
+    "wall1",
+    "bush1",
+    "wall2",
+    "bush2",
+    "crate",
+    "cube",
+    "ghost"
+  ],
+  "scenery": [
+    "rock0",
+    "coral0",
+    "rock1",
+    "coral1",
+    "rock2",
+    "coral2",
+    "palm0",
+    "palm1",
+    "starfish"
+  ],
+  "ground": {
+    "albedo": "ground_albedo.webp",
+    "mask": "ground_mask.png",
+    "min": -3,
+    "size": 36
+  }
+}

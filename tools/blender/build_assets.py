@@ -83,6 +83,7 @@ def reset_scene(transparent=True, samples=48):
 
 
 MATS = {}
+SEG = 32  # sphere segments; the glTF exporter lowers this for lighter real-time meshes
 
 
 def mat(name, color, rough=0.6, emit=0.0, metal=0.0, spec=0.25):
@@ -114,8 +115,12 @@ def outline_mat():
     return m
 
 
+NOISE_SPECS = {}  # name -> colours/pattern, so the glTF exporter can bake an equivalent image texture
+
+
 def noise_mat(name, c1, c2, scale=6.0, rough=0.7, detail=4.0, brick=None):
     """Mottled two-colour material (stone, leaves, wood); optional brick/plank pattern."""
+    NOISE_SPECS[name] = dict(c1=c1, c2=c2, scale=scale, rough=rough, brick=brick)
     if name in MATS:
         return MATS[name]
     m = bpy.data.materials.new(name)
@@ -190,11 +195,11 @@ def _finish(o, m, outline, smooth, bevel=0.0):
 
 def prim(kind, name, loc, scale, m, parent=None, rot=(0, 0, 0), outline=0.012, smooth=True, bevel=0.0, **kw):
     if kind == 'sphere':
-        bpy.ops.mesh.primitive_uv_sphere_add(segments=kw.get('seg', 32), ring_count=kw.get('rings', 16), radius=1)
+        bpy.ops.mesh.primitive_uv_sphere_add(segments=min(kw.get('seg', SEG), SEG), ring_count=min(kw.get('rings', SEG // 2), SEG // 2), radius=1)
     elif kind == 'ico':
         bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=kw.get('sub', 2), radius=1)
     elif kind == 'cyl':
-        bpy.ops.mesh.primitive_cylinder_add(vertices=kw.get('seg', 24), radius=1, depth=1)
+        bpy.ops.mesh.primitive_cylinder_add(vertices=min(kw.get('seg', 24), max(8, SEG * 3 // 4)), radius=1, depth=1)
     elif kind == 'cube':
         bpy.ops.mesh.primitive_cube_add(size=1)
     elif kind == 'cone':
