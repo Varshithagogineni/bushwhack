@@ -116,6 +116,37 @@ def tex_noise(c1, c2, seed, scale=16):
     return ramp(fbm(seed, scale), c1, c2)
 
 
+def tex_straw(c1, c2, seed):
+    """Basket-weave straw: diagonal fibres that switch direction every block."""
+    y, x = np.mgrid[0:N, 0:N]
+    a = np.sin((x + y) / N * 2 * np.pi * 28)
+    b = np.sin((x - y) / N * 2 * np.pi * 28)
+    weave = np.where(((x // 16 + y // 16) % 2) == 0, a, b)
+    col = ramp(weave * 0.45 + fbm(seed, 8) * 0.5, c1, c2)
+    return col * (0.8 + 0.2 * np.abs(weave))[..., None]
+
+
+def tex_cloth(c1, c2, seed):
+    y, x = np.mgrid[0:N, 0:N]
+    weave = np.sin(x * np.pi / 2) * np.sin(y * np.pi / 2) * 0.25
+    return ramp(fbm(seed, 28) * 0.5 + weave, c1, c2, -1.2, 1.2)
+
+
+def tex_rock(c1, c2, seed):
+    col = ramp(fbm(seed, 22), c1, c2)
+    cracks = np.abs(fbm(seed + 5, 14)) < 0.05
+    col[cracks] *= 0.68
+    lichen = fbm(seed + 9, 6) > 1.15
+    col[lichen] = col[lichen] * 0.5 + srgb('#b9b78a') * 0.5
+    return col
+
+
+def tex_wood(c1, c2, seed):
+    y, x = np.mgrid[0:N, 0:N]
+    grain = fbm(seed, 30, aniso=0.12)
+    return ramp(grain + 0.35 * np.sin(y / N * 2 * np.pi * 10 + grain * 2), c1, c2)
+
+
 def tex_bark(seed):
     y, x = np.mgrid[0:N, 0:N]
     rings = (np.sin(y / N * 2 * np.pi * 6) + 1) / 2
@@ -143,11 +174,20 @@ def texture_for(name, spec):
     """Generate (once) an image texture equivalent to a procedural noise material."""
     if name in TEX_CACHE:
         return TEX_CACHE[name]
-    seed = abs(hash(name)) % 10000
-    if spec.get('brick'):
-        rgb = tex_brick(spec['c1'], spec['c2'], seed)
-    elif name.startswith('plank'):
+    seed = sum(ord(ch) * (i + 1) for i, ch in enumerate(name)) % 10000  # stable across runs
+    kind = spec.get('kind')
+    if kind == 'straw':
+        rgb = tex_straw(spec['c1'], spec['c2'], seed)
+    elif kind == 'cloth':
+        rgb = tex_cloth(spec['c1'], spec['c2'], seed)
+    elif kind == 'rock':
+        rgb = tex_rock(spec['c1'], spec['c2'], seed)
+    elif kind == 'wood':
+        rgb = tex_wood(spec['c1'], spec['c2'], seed)
+    elif kind == 'planks' or name.startswith('plank'):
         rgb = tex_planks(spec['c1'], spec['c2'], seed)
+    elif spec.get('brick'):
+        rgb = tex_brick(spec['c1'], spec['c2'], seed)
     elif name.startswith('leaf'):
         rgb = tex_leaves(spec['c1'], spec['c2'], seed)
     elif name == 'bark':
@@ -243,7 +283,7 @@ def export(root, name, join=True):
 def build_palm(v):
     root = empty('palm')
     rng = random.Random(v + 5)
-    bark = noise_mat('bark', '#7a4a25', '#c48a52', 4)
+    bark = noise_mat('bark', '#6f4f33', '#a7845c', 4)
     height = 2.6 + v * 0.5
     lean = rng.uniform(0.25, 0.4) * (1 if v % 2 else -1)
     segs = 9
@@ -256,7 +296,7 @@ def build_palm(v):
         limb(f'trunk{i}', pts[i], pts[i + 1], r, bark, root, outline=0.014)
         prim('torus', 'ring', pts[i + 1], (r * 1.05, r * 1.05, 0.25), bark, root, minor=0.18, outline=0)
     top = pts[-1]
-    leaf = mat('palmleaf', '#4f9e35', rough=0.6)
+    leaf = mat('palmleaf', '#62873a', rough=0.65)
     leaf.use_backface_culling = False
     for k in range(9):
         a = k / 9 * 2 * math.pi + rng.uniform(-0.15, 0.15)
@@ -313,7 +353,7 @@ def build_rock(v):
     bm.free()
     o.scale = ([0.55, 0.5, 0.35], [0.4, 0.45, 0.4], [0.7, 0.55, 0.3])[v]
     o.location = (0, 0, 0.05)
-    _finish(o, noise_mat('rockstone', '#9aa0a0', '#d0d4cf', 5), 0.012, True)
+    _finish(o, noise_mat('rockstone', '#8f9290', '#c9cbc2', 5, kind='rock'), 0, True)
     keep_parent(o, root)
     if v == 0:
         prim('ico', 'moss', (0.05, 0.05, 0.3), (0.3, 0.28, 0.08), noise_mat('moss', '#4f9a3a', '#7cc455', 9), root, sub=2, outline=0)
@@ -324,7 +364,7 @@ def build_coral(v):
     root = empty('coral')
     rng = random.Random(v + 40)
     cols = [('#ff7aa8', '#ffd25e'), ('#b48cff', '#ff9f5e'), ('#ff9f5e', '#7ee0c3')][v]
-    prim('ico', 'base', (0, 0, 0.0), (0.45, 0.42, 0.18), noise_mat('rockstone', '#9aa0a0', '#d0d4cf', 5), root, sub=2)
+    prim('ico', 'base', (0, 0, 0.0), (0.45, 0.42, 0.18), noise_mat('rockstone', '#8f9290', '#c9cbc2', 5, kind='rock'), root, sub=2)
     for i in range(7):
         a = rng.uniform(0, 2 * math.pi)
         r = rng.uniform(0.05, 0.3)
@@ -335,6 +375,20 @@ def build_coral(v):
         limb(f'branch{i}', base, tip, 0.045, mat('coral' + c, c, rough=0.5), root, outline=0.008)
         prim('sphere', 'tip', tip, (0.065, 0.065, 0.065), mat('coral' + c, c, rough=0.5), root, outline=0.008, seg=12, rings=8)
     prim('sphere', 'fan', (0.2, -0.1, 0.3), (0.28, 0.05, 0.22), mat('coralfan', '#c79bff', rough=0.6), root, rot=(0, 0, 0.6), outline=0.008)
+    return root
+
+
+def build_crab():
+    root = empty('crab')
+    shell = mat('crabshell', '#c4573a', rough=0.55)
+    prim('sphere', 'body', (0, 0, 0.07), (0.13, 0.1, 0.055), shell, root, seg=16, rings=8)
+    for sx in (1, -1):
+        limb('arm', (0.09 * sx, -0.06, 0.07), (0.15 * sx, -0.14, 0.08), 0.018, shell, root)
+        prim('sphere', 'claw', (0.16 * sx, -0.16, 0.085), (0.045, 0.035, 0.03), shell, root, seg=12, rings=6)
+        for k in range(3):
+            y = 0.03 - k * 0.04
+            limb('leg', (0.1 * sx, y, 0.06), (0.19 * sx, y + 0.02, 0.0), 0.012, shell, root)
+        prim('sphere', 'eye', (0.035 * sx, -0.09, 0.12), (0.014, 0.014, 0.014), mat('crabeye', '#1b1b1b'), root, seg=8, rings=4)
     return root
 
 
@@ -402,16 +456,34 @@ def albedo_material(mask_a, mask_b):
         links.new(b, mx.inputs[7])
         return mx.outputs[2]
 
-    grass = cramp(noise(0.9, 4), [(0.3, '#5a963c'), (0.55, '#6ca64a'), (0.78, '#8bbd5c')])
-    grass = mix(grass, cramp(noise(7, 2), [(0.45, '#4d8636'), (0.6, '#79ad52')]), 0.25)
-    sand = cramp(noise(3, 3), [(0.35, '#d9bf86'), (0.7, '#ead6a0')])
+    grass = cramp(noise(0.9, 4), [(0.3, '#6a8a40'), (0.55, '#7b9a4c'), (0.78, '#97ad62')])
+    grass = mix(grass, cramp(noise(7, 2), [(0.45, '#5d7d39'), (0.6, '#8aa35a')]), 0.25)
+    # Wind-blown ripples for every sandy surface.
+    wave = nodes.new('ShaderNodeTexWave')
+    wave.inputs['Scale'].default_value = 0.9
+    wave.inputs['Distortion'].default_value = 7.0
+    wave.inputs['Detail'].default_value = 2.0
+    wave.inputs['Detail Scale'].default_value = 1.2
+    links.new(co.outputs['Object'], wave.inputs['Vector'])
+    ripple = cramp(wave.outputs['Fac'], [(0.2, '#c9b38a'), (0.55, '#ffffff')])
+
+    def rippled(col):
+        mx = nodes.new('ShaderNodeMix')
+        mx.data_type = 'RGBA'
+        mx.blend_type = 'MULTIPLY'
+        mx.inputs['Factor'].default_value = 0.6
+        links.new(col, mx.inputs[6])
+        links.new(ripple, mx.inputs[7])
+        return mx.outputs[2]
+
+    sand = rippled(cramp(noise(3, 3), [(0.35, '#cdb68a'), (0.7, '#ddc9a0')]))
     vor = nodes.new('ShaderNodeTexVoronoi')
     vor.feature = 'DISTANCE_TO_EDGE'
     vor.inputs['Scale'].default_value = 2.4
     links.new(co.outputs['Object'], vor.inputs['Vector'])
-    cobble = cramp(vor.outputs['Distance'], [(0.0, '#6e6458'), (0.07, '#a89a84'), (0.3, '#c9bba2')])
-    beach = cramp(noise(2.5, 3), [(0.35, '#e8cf94'), (0.7, '#f4e2b4')])
-    seabed = cramp(B.outputs['Green'], [(0.0, '#d2b77c'), (0.35, '#a9b38a'), (1.0, '#4f8f8a')])
+    cobble = cramp(vor.outputs['Distance'], [(0.0, '#6c655b'), (0.07, '#a29a89'), (0.3, '#bdb3a0')])
+    beach = rippled(cramp(noise(2.5, 3), [(0.35, '#dfcaa0'), (0.7, '#ecdcb8')]))
+    seabed = rippled(cramp(B.outputs['Green'], [(0.0, '#d4bf93'), (0.35, '#b2b590'), (1.0, '#4d8a84')]))
     arena = mix(mix(grass, sand, A.outputs['Red']), cobble, A.outputs['Green'])
     land = mix(beach, arena, A.outputs['Blue'])
     links.new(mix(seabed, land, B.outputs['Red']), emit.inputs['Color'])
@@ -465,6 +537,7 @@ def run(manifest):
     jobs.append(('cube', L['build_cube'], True, 'props'))
     jobs.append(('ghost', L['build_ghost'], True, 'props'))
     jobs.append(('starfish', build_starfish, True, 'scenery'))
+    jobs.append(('crab', build_crab, True, 'scenery'))
     for name, build, join, group in jobs:
         if ONLY and name not in ONLY and group not in ONLY:
             continue

@@ -3,6 +3,10 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { MAP, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON } from '/shared/game.js';
 import { Renderer } from './render.js';
 
@@ -37,8 +41,8 @@ export class Renderer3D extends Renderer {
     this.gl.shadowMap.enabled = true;
     this.gl.shadowMap.type = THREE.PCFSoftShadowMap;
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color('#1d6f99');
-    this.camera = new THREE.PerspectiveCamera(32, 1, 0.5, 300);
+    this.scene.background = new THREE.Color('#1f6d7e');
+    this.camera = new THREE.PerspectiveCamera(30, 1, 0.5, 300);
     this.raycaster = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.players = new Map();
@@ -64,13 +68,22 @@ export class Renderer3D extends Renderer {
     // Frame roughly the same play area as the 2D view on every screen shape.
     const visibleW = this.w / this.scale * U;
     const hfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect);
-    this.camDist = visibleW / 2 / Math.tan(hfov / 2) * 0.92;
+    this.camDist = visibleW / 2 / Math.tan(hfov / 2) * 0.84;
     this.camera.updateProjectionMatrix();
+    if (this.composer) {
+      this.composer.setPixelRatio(this.gl.getPixelRatio());
+      this.composer.setSize(this.w, this.h);
+      const px = this.gl.getPixelRatio();
+      for (const pass of [this.tiltH, this.tiltV]) {
+        pass.uniforms.texel.value.set(1 / (this.w * px), 1 / (this.h * px));
+        pass.uniforms.amount.value = 2.6 * Math.min(1, this.h / 850); // gentler on short phone screens
+      }
+    }
   }
 
   setupLights() {
-    this.scene.add(new THREE.HemisphereLight('#d9ecff', '#7a8a55', 1.05));
-    const sun = new THREE.DirectionalLight('#ffdcaa', 2.8);
+    this.scene.add(new THREE.HemisphereLight('#bcd6e3', '#8c7a52', 0.95));
+    const sun = new THREE.DirectionalLight('#ffcf8f', 3.0);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     const s = 15;
@@ -78,7 +91,7 @@ export class Renderer3D extends Renderer {
     sun.shadow.bias = -0.0004;
     sun.shadow.normalBias = 0.025;
     this.sun = sun;
-    this.sunOffset = new THREE.Vector3(-12, 15, 6); // low front-left sun: lit faces, long shadows
+    this.sunOffset = new THREE.Vector3(-15, 12, 8); // low golden-hour sun from the front-left: long shadows
     this.scene.add(sun, sun.target);
   }
 
@@ -106,8 +119,76 @@ export class Renderer3D extends Renderer {
     this.buildPoison();
     this.buildStatic();
     this.buildDecor(albedo.image);
+    this.setupPost();
     this.resize();
     this.ready = true;
+  }
+
+  setupPost() {
+    const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    this.composer = new EffectComposer(this.gl, rt);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    const tilt = (dir) => new ShaderPass({
+      uniforms: { tDiffuse: { value: null }, dir: { value: new THREE.Vector2(...dir) }, texel: { value: new THREE.Vector2() }, amount: { value: 2.6 } },
+      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        uniform vec2 dir, texel;
+        uniform float amount;
+        varying vec2 vUv;
+        void main() {
+          float d = abs(vUv.y - 0.5) * 2.0;
+          float r = smoothstep(0.45, 1.0, d) * amount;
+          vec4 sum = vec4(0.0);
+          float tw = 0.0;
+          for (int i = -4; i <= 4; i++) {
+            float w = exp(-float(i * i) / 8.0);
+            sum += texture2D(tDiffuse, vUv + dir * texel * float(i) * r) * w;
+            tw += w;
+          }
+          gl_FragColor = sum / tw;
+        }`,
+    });
+    this.tiltH = tilt([1, 0]);
+    this.tiltV = tilt([0, 1]);
+    const grade = new ShaderPass({
+      uniforms: { tDiffuse: { value: null } },
+      vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        varying vec2 vUv;
+        void main() {
+          vec4 c = texture2D(tDiffuse, vUv);
+          float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+          vec3 col = mix(vec3(l), c.rgb, 0.86) * vec3(1.05, 1.0, 0.93);
+          col = col * 0.97 + vec3(0.012, 0.01, 0.006);
+          col *= mix(0.74, 1.0, smoothstep(0.95, 0.35, length(vUv - 0.5)));
+          gl_FragColor = vec4(col, c.a);
+        }`,
+    });
+    this.composer.addPass(this.tiltH);
+    this.composer.addPass(this.tiltV);
+    this.composer.addPass(grade);
+    this.composer.addPass(new OutputPass());
+    this.frameTimes = [];
+  }
+
+  // If the device can't hold ~45 fps, drop the post effects and shadow resolution.
+  watchPerf(dt) {
+    if (!this.frameTimes || this.lowPower) return;
+    this.frameTimes.push(dt);
+    if (this.frameTimes.length < 150) return;
+    const avg = this.frameTimes.slice(30).reduce((a, b) => a + b, 0) / (this.frameTimes.length - 30);
+    this.frameTimes = null;
+    if (avg > 1 / 45) {
+      this.lowPower = true;
+      this.composer = null;
+      this.sun.shadow.mapSize.set(1024, 1024);
+      this.sun.shadow.map?.dispose();
+      this.sun.shadow.map = null;
+      this.gl.setPixelRatio(1);
+      this.resize();
+    }
   }
 
   fixMaterials(root) {
@@ -136,25 +217,32 @@ export class Renderer3D extends Renderer {
     for (const m of meshes) {
       let pivot = root;
       for (let p = m.parent; p && p !== root; p = p.parent) if (pivots.has(p)) { pivot = p; break; }
-      const outline = m.material === this.outlineMat;
-      const key = `${pivot.uuid}:${outline}`;
+      const mat = m.material;
+      const outline = mat === this.outlineMat;
+      const glow = !outline && mat.emissive && mat.emissive.getHex() !== 0;
+      const map = !outline && !glow ? mat.map : null;
+      const kind = outline ? 'o' : glow ? 'g' : map ? `t${map.uuid}` : 'v';
+      const key = `${pivot.uuid}|${kind}`;
       const geo = m.geometry.clone();
       geo.applyMatrix4(new THREE.Matrix4().copy(pivot.matrixWorld).invert().multiply(m.matrixWorld));
-      for (const name of Object.keys(geo.attributes)) if (!['position', 'normal'].includes(name)) geo.deleteAttribute(name);
-      const c = m.material.color.clone();
-      if (m.material.emissive && m.material.emissiveIntensity > 0) c.add(m.material.emissive.clone().multiplyScalar(0.6));
+      const keep = map ? ['position', 'normal', 'uv'] : ['position', 'normal'];
+      for (const name of Object.keys(geo.attributes)) if (!keep.includes(name)) geo.deleteAttribute(name);
+      const c = glow ? mat.emissive.clone().multiplyScalar(1.6) : mat.color.clone();
       const n = geo.attributes.position.count;
       const col = new Float32Array(n * 3);
       for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
       geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-      if (!groups.has(key)) groups.set(key, { pivot, outline, geos: [] });
+      if (!groups.has(key)) groups.set(key, { pivot, kind, map, geos: [] });
       groups.get(key).geos.push(geo.index ? geo : geo.setIndex([...Array(n).keys()]));
       m.removeFromParent();
     }
-    for (const { pivot, outline, geos } of groups.values()) {
-      const mesh = new THREE.Mesh(mergeGeometries(geos), outline ? this.outlineMat : null);
-      mesh.userData.body = !outline;
-      mesh.castShadow = !outline;
+    for (const { pivot, kind, map, geos } of groups.values()) {
+      const material = kind === 'o' ? this.outlineMat
+        : kind === 'g' ? new THREE.MeshBasicMaterial({ vertexColors: true })
+          : new THREE.MeshStandardMaterial({ vertexColors: true, map, roughness: 0.8 });
+      const mesh = new THREE.Mesh(mergeGeometries(geos), material);
+      mesh.userData.body = kind !== 'o';
+      mesh.castShadow = kind !== 'o' && kind !== 'g';
       pivot.add(mesh);
     }
   }
@@ -187,9 +275,9 @@ export class Renderer3D extends Renderer {
         mask: { value: mask },
         uMin: { value: g.min },
         uSize: { value: g.size },
-        shallow: { value: new THREE.Color('#5fe3cf') },
-        mid: { value: new THREE.Color('#1fa3c0') },
-        deep: { value: new THREE.Color('#145f8f') },
+        shallow: { value: new THREE.Color('#a6e3d2') },
+        mid: { value: new THREE.Color('#4cb3a5') },
+        deep: { value: new THREE.Color('#1f6d7e') },
       },
       vertexShader: /* glsl */`
         varying vec3 vWorld;
@@ -222,6 +310,20 @@ export class Renderer3D extends Renderer {
           vec2 u = f * f * (3.0 - 2.0 * f);
           return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
         }
+        // Cellular noise: distance to nearest and second-nearest drifting cell points.
+        vec2 worley(vec2 p) {
+          vec2 n = floor(p), f = fract(p);
+          float f1 = 8.0, f2 = 8.0;
+          for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+            vec2 g = vec2(float(i), float(j));
+            vec2 o = vec2(hash(n + g), hash(n + g + 17.3));
+            o = 0.5 + 0.45 * sin(time * 0.5 + 6.2831 * o);
+            vec2 r = g + o - f;
+            float d = dot(r, r);
+            if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) { f2 = d; }
+          }
+          return vec2(sqrt(f1), sqrt(f2));
+        }
         void main() {
           vec2 uv = vec2((vWorld.x - uMin) / uSize, 1.0 - (vWorld.z - uMin) / uSize);
           vec3 m = vec3(0.0, 1.0, 0.0);
@@ -230,14 +332,17 @@ export class Renderer3D extends Renderer {
           if (land > 0.97) discard;
           vec3 col = mix(shallow, mid, smoothstep(0.0, 0.35, shore));
           col = mix(col, deep, smoothstep(0.35, 1.0, shore));
-          float alpha = mix(0.38, 0.95, smoothstep(0.0, 0.7, shore));
+          float alpha = mix(0.28, 0.93, smoothstep(0.0, 0.75, shore));
           float c = clamp(caustic(vWorld.xz * 2.6 + 40.0, time * 0.55), 0.0, 1.0);
           col += vec3(0.85, 1.0, 0.95) * c * 0.22 * (1.0 - smoothstep(0.1, 0.7, shore));
           // Surf: bands that roll in toward the beach and fade.
-          float wave = sin(shore * 40.0 - time * 1.6 + vnoise(vWorld.xz * 1.5) * 4.0);
-          float surf = smoothstep(0.9, 1.0, wave) * (1.0 - smoothstep(0.0, 0.09, shore));
-          float edge = 1.0 - smoothstep(0.0, 0.035 + 0.02 * sin(time * 1.3 + vWorld.x * 0.7), shore);
-          float foam = clamp(max(surf * 0.55, edge) * (0.6 + 0.4 * vnoise(vWorld.xz * 6.0 + time)), 0.0, 1.0);
+          // Lacy surf: a web of foam that washes in and out along the beach.
+          vec2 w = worley(vWorld.xz * 3.2);
+          float lace = 1.0 - smoothstep(0.03, 0.11, w.y - w.x);
+          float wash = 0.06 + 0.035 * sin(time * 0.9 + vWorld.x * 0.4 + vWorld.z * 0.3);
+          float band = 1.0 - smoothstep(wash * 0.4, wash, shore);
+          float edge = 1.0 - smoothstep(0.0, 0.016, shore);
+          float foam = clamp(max(edge, lace * band * 0.95), 0.0, 1.0);
           col = mix(col, vec3(1.0), foam);
           alpha = max(alpha, foam * 0.95);
           gl_FragColor = vec4(col, alpha * (1.0 - land));
@@ -395,7 +500,8 @@ export class Renderer3D extends Renderer {
       new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw ? rnd() * Math.PI * 2 : 0),
       new THREE.Vector3().setScalar(scale * (0.85 + rnd() * 0.35)))));
     // Palms lean out toward the sea so their crowns never hide the arena.
-    const palms = ring(0.5, 26, 1.0);
+    // None on the south beach: the camera looks north, so they'd block the bottom of the screen.
+    const palms = ring(0.5, 34, 1.0).filter(([, z]) => z < 29);
     for (const v of [0, 1]) {
       this.instanced(`palm${v}`, palms.filter((_, i) => i % 2 === v).map(([x, z]) => new THREE.Matrix4().compose(
         new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(-(z - 15), x - 15) + (rnd() - 0.5) * 0.6),
@@ -406,6 +512,56 @@ export class Renderer3D extends Renderer {
       place(`coral${v}`, ring(2.1 + v * 0.3, 7, 3), 1.1);
     }
     place('starfish', ring(0.35, 14, 2), 1.2);
+
+    // Fish circling in the shallows.
+    const body = new THREE.SphereGeometry(0.1, 10, 6).scale(1, 0.4, 0.5);
+    const tail = new THREE.ConeGeometry(0.06, 0.1, 4).rotateZ(Math.PI / 2).translate(-0.13, 0, 0);
+    this.fish = new THREE.InstancedMesh(mergeGeometries([body, tail]), new THREE.MeshStandardMaterial({ color: '#41606a', roughness: 0.5 }), 40);
+    this.fishData = ring(2.1, 40, 3.5).map(([x, z]) => ({ x, z, r: 0.35 + rnd() * 0.8, w: (0.4 + rnd() * 0.6) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * 6.28, s: 0.7 + rnd() * 0.6 }));
+    this.scene.add(this.fish);
+    // Crabs scuttling sideways along the beach.
+    this.crabs = this.dynamicInstanced('crab', 8);
+    this.crabData = ring(0.32, 8, 4).map(([x, z]) => {
+      const out = Math.atan2(z - 15, x - 15);
+      return { x, z, tx: -Math.sin(out), tz: Math.cos(out), yaw: -out + Math.PI / 2, ph: rnd() * 6.28, sp: 0.5 + rnd() * 0.6 };
+    });
+  }
+
+  dynamicInstanced(name, count) {
+    const src = this.models[name];
+    src.updateMatrixWorld(true);
+    const parts = [];
+    src.traverse((o) => {
+      if (!o.isMesh) return;
+      const im = new THREE.InstancedMesh(o.geometry, o.material, count);
+      im.castShadow = true;
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.scene.add(im);
+      parts.push({ im, local: o.matrixWorld.clone() });
+    });
+    const tmp = new THREE.Matrix4();
+    return {
+      set: (i, m) => { for (const p of parts) p.im.setMatrixAt(i, tmp.multiplyMatrices(m, p.local)); },
+      commit: () => { for (const p of parts) p.im.instanceMatrix.needsUpdate = true; },
+    };
+  }
+
+  animateWildlife(t) {
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), pos = new THREE.Vector3(), sc = new THREE.Vector3();
+    this.fishData.forEach((f, i) => {
+      const a = f.ph + f.w * t;
+      pos.set(f.x + Math.cos(a) * f.r, 0.012, f.z + Math.sin(a) * f.r);
+      q.setFromAxisAngle(up, -a - Math.sign(f.w) * Math.PI / 2 + Math.sin(t * 8 + i) * 0.15);
+      this.fish.setMatrixAt(i, m.compose(pos, q, sc.setScalar(f.s)));
+    });
+    this.fish.instanceMatrix.needsUpdate = true;
+    this.crabData.forEach((c, i) => {
+      const k = Math.sin(t * c.sp + c.ph) * 0.7 + Math.sin(t * c.sp * 2.3 + c.ph) * 0.2;
+      pos.set(c.x + c.tx * k, 0, c.z + c.tz * k);
+      q.setFromAxisAngle(up, c.yaw);
+      this.crabs.set(i, m.compose(pos, q, sc.setScalar(1.3)));
+    });
+    this.crabs.commit();
   }
 
   makeTuft() {
@@ -445,11 +601,14 @@ export class Renderer3D extends Renderer {
     if (!e) {
       const obj = this.models[p.brawler].clone(true);
       obj.scale.setScalar(CHAR_SCALE);
-      const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.6, transparent: true });
+      const mats = new Map();
       const piv = {};
       obj.traverse((o) => {
         if (PIVOTS.includes(o.name)) piv[o.name] = o;
-        if (o.isMesh && o.userData.body) o.material = mat;
+        if (o.isMesh && o.userData.body) {
+          if (!mats.has(o.material)) mats.set(o.material, o.material.clone());
+          o.material = mats.get(o.material);
+        }
       });
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.5, 40).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: p.isMe ? ME : FOE, transparent: true, opacity: 0.9, depthWrite: false }));
@@ -457,7 +616,7 @@ export class Renderer3D extends Renderer {
       const holder = new THREE.Group();
       holder.add(obj, ring);
       this.scene.add(holder);
-      e = { obj: holder, model: obj, mat, piv, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
+      e = { obj: holder, model: obj, mats: [...mats.values()], piv, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
       this.players.set(p.id, e);
     }
     e.seen = true;
@@ -483,8 +642,12 @@ export class Renderer3D extends Renderer {
     if (e.piv.legR) e.piv.legR.rotation.x = -0.55 * s;
     if (e.piv.armLpiv) e.piv.armLpiv.rotation.x = -0.45 * s;
     if (e.piv.upper) e.piv.upper.position.y = Math.abs(Math.cos(e.phase)) * 0.035 * e.walk + Math.sin(now / 500) * 0.008;
-    e.mat.opacity = p.bush ? (p.isMe ? 0.55 : 0.4) : 1;
-    e.mat.emissive.setScalar(flash * 0.9);
+    for (const m of e.mats) {
+      m.opacity = p.bush ? (p.isMe ? 0.55 : 0.4) : 1;
+      // Only blend while hidden in a bush; opaque rendering keeps the model's parts sorted correctly.
+      if (m.transparent !== m.opacity < 1) { m.transparent = m.opacity < 1; m.needsUpdate = true; }
+      m.emissive?.setScalar(flash * 0.9);
+    }
     e.model.position.y = p.dash ? 0.08 : 0;
     // Super charge ring under your own feet.
     if (p.isMe) {
@@ -604,7 +767,7 @@ export class Renderer3D extends Renderer {
     // Camera follows the view's camera point, high and tilted like a diorama.
     this.shakeAmt *= 0.88;
     this.camTarget.set(v.cam.x * U, 0, v.cam.y * U);
-    const pitch = THREE.MathUtils.degToRad(52);
+    const pitch = THREE.MathUtils.degToRad(50);
     this.camera.position.set(
       this.camTarget.x + (Math.random() - 0.5) * this.shakeAmt * 0.02,
       this.camDist * Math.sin(pitch),
@@ -744,7 +907,10 @@ export class Renderer3D extends Renderer {
       return true;
     });
 
-    this.gl.render(this.scene, this.camera);
+    this.animateWildlife(t);
+    if (this.composer) this.composer.render(dt);
+    else this.gl.render(this.scene, this.camera);
+    this.watchPerf(dt);
     this.drawOverlay(v, now);
   }
 
@@ -819,10 +985,10 @@ export class Renderer3D extends Renderer {
     for (const p of v.players) {
       const s = this.toScreen(null, p.x, p.y, 2.25);
       if (s.behind) continue;
-      ctx.font = 'bold 15px system-ui';
+      ctx.font = '17px "Patrick Hand", system-ui';
       ctx.lineWidth = 4;
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.fillStyle = p.isMe ? '#9dffbf' : '#fff';
+      ctx.strokeStyle = 'rgba(40,28,18,0.85)';
+      ctx.fillStyle = p.isMe ? '#c9f2b6' : '#f6eedb';
       const label = p.isMe ? 'You' : p.name;
       ctx.strokeText(label, s.x, s.y - 16);
       ctx.fillText(label, s.x, s.y - 16);
@@ -856,7 +1022,7 @@ export class Renderer3D extends Renderer {
     }
     for (const g of v.ghosts) {
       const s = this.toScreen(null, g.x, g.y, 1.7);
-      ctx.font = 'bold 14px system-ui';
+      ctx.font = '16px "Patrick Hand", system-ui';
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';
       ctx.fillStyle = '#d9ccff';

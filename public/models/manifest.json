@@ -24,7 +24,8 @@
     "coral2",
     "palm0",
     "palm1",
-    "starfish"
+    "starfish",
+    "crab"
   ],
   "ground": {
     "albedo": "ground_albedo.webp",
