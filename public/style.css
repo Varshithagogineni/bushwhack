@@ -43,6 +43,15 @@ body {
 h2 { margin: 0 0 12px; font-size: 1.15rem; }
 h3 { margin: 0 0 4px; font-size: 0.95rem; }
 
+.hero-art {
+  display: block;
+  width: calc(100% + 40px);
+  margin: -20px -20px -6px;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: radial-gradient(circle at 50% 70%, #4b8f3c 0, transparent 70%);
+}
 .logo {
   margin: 0;
   font-size: clamp(2.4rem, 11vw, 3.4rem);
@@ -126,7 +135,7 @@ kbd { background: rgba(255, 255, 255, 0.15); border-radius: 5px; padding: 1px 5p
   gap: 6px;
 }
 .card.selected { border-color: var(--accent); background: rgba(255, 205, 60, 0.12); }
-.card canvas { width: 56px; height: 56px; align-self: center; }
+.card canvas { width: 76px; height: 76px; align-self: center; }
 .card .name { font-weight: 900; font-size: 1.05rem; text-align: center; }
 .card .role { font-size: 0.75rem; color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: 1px; }
 .card .desc { font-size: 0.78rem; color: var(--muted); line-height: 1.35; min-height: 3em; }
