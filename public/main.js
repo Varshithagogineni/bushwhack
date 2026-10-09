@@ -1,12 +1,12 @@
 import {
   DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES, MODES, MODE_IDS,
-  movePlayer, moveGhost, speedFactor, round2, inBush, isWallAt, clamp, PLAYER_RADIUS,
+  movePlayer, moveGhost, speedFactor, round2, inBush, isWallAt, clamp, PLAYER_RADIUS, weaponOf, SWAP_TIME,
 } from '/shared/game.js';
 import { BADGES } from '/shared/badges.js';
 import { Input } from './input.js';
 import { Renderer, drawBrawler } from './render.js';
 import { art, loadArt, drawPortrait } from './assets.js';
-import { sfx, isMuted, setMuted } from './sfx.js';
+import { sfx, isMuted, setMuted, setGameAudio } from './sfx.js';
 import { hostRoom, joinRoom } from './net/p2p.js';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
@@ -205,6 +205,7 @@ const input = new Input(canvas);
 input.onFire = (intent) => tryFire(intent);
 input.onSuper = (intent) => trySuper(intent);
 input.onEmote = (n) => sendEmote(n);
+input.onSwap = () => trySwap();
 
 // ---------- networking ----------
 
@@ -335,6 +336,8 @@ function showScreen(name) {
   $('lobby').classList.toggle('hidden', name !== 'lobby');
   $('game').classList.toggle('hidden', name !== 'game');
   $('profile').classList.toggle('hidden', name !== 'profile');
+  setGameAudio(name === 'game');
+  if (name !== 'game') net.events.length = 0; // don't replay a backlog of shots when you come back
   document.body.style.overflow = name === 'game' ? 'hidden' : '';
   if (stage) (name === 'lobby' ? stage.start : stage.stop)();
 }
@@ -603,7 +606,12 @@ function onSnap(m) {
 
   const prevSu = net.me.su ?? 0;
   net.me = m.me;
-  if (m.me.alive && prevSu < 1 && m.me.su >= 1) sfx.superReady();
+  // Keep our predicted weapon until the host has caught up with the swap.
+  if (net.swapPending) {
+    if (performance.now() < net.swapPending.until && m.me.weapon !== net.swapPending.weapon) net.me.weapon = net.swapPending.weapon;
+    else net.swapPending = null;
+  }
+  if (m.me.alive && prevSu < 1 && m.me.su >= 1 && !document.hidden) sfx.superReady();
   if (m.me.ghost !== net.wasGhost) { net.wasGhost = m.me.ghost; net.pred = null; net.pending = []; }
 
   const self = m.me.ghost ? m.gmap.get(app.myId) : m.pmap.get(app.myId);
@@ -611,7 +619,7 @@ function onSnap(m) {
     // Server says where we were after input #ack; replay the inputs it hasn't seen yet.
     const shown = net.pred ? { x: net.pred.x + net.err.x, y: net.pred.y + net.err.y } : null;
     net.pending = net.pending.filter((i) => i.seq > m.me.ack);
-    const p = { x: self.x, y: self.y };
+    const p = { x: self.x, y: self.y, kvx: m.me.kvx || 0, kvy: m.me.kvy || 0 };
     for (const i of net.pending) predictStep(p, i.mx, i.my, m);
     net.pred = p;
     if (shown) {
@@ -707,14 +715,26 @@ function tryFire(intent) {
     send({ t: 'h' });
     return;
   }
-  if (net.cooldown > 0 || net.me.ammo < 1) return;
-  const aim = aimFor(intent, BRAWLERS[myBrawler()].range);
+  if (net.cooldown > 0 || net.me.ammo < 1 || net.me.swap > 0) return;
+  const aim = aimFor(intent, weaponOf(myBrawler(), net.me.weapon).range);
   if (!aim) return;
   net.aimAngle = aim.angle;
   net.cooldown = CLIENT_COOLDOWN;
   net.me.ammo -= 1;
   send({ t: 'f', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist), l: lead() });
   spawnLocalShots(aim.angle, aim.dist, false);
+}
+
+// Swap main <-> alt weapon. Predicted locally (instant UI), confirmed by the host.
+function trySwap() {
+  if (!canAct() || !net.me.alive || net.me.swap > 0) return;
+  send({ t: 'w' });
+  net.me.weapon = net.me.weapon ? 0 : 1;
+  net.swapPending = { weapon: net.me.weapon, until: performance.now() + 600 + (net.rtt ?? 0) };
+  net.me.swap = SWAP_TIME;
+  net.cooldown = Math.max(net.cooldown, SWAP_TIME);
+  renderer.addEvent({ k: 'swap', id: app.myId, w: net.me.weapon }, performance.now());
+  sfx.swap();
 }
 
 function trySuper(intent) {
@@ -735,11 +755,15 @@ const lead = () => Math.round(Math.min(150, (net.rtt ?? 0) / 2));
 let localShotId = 0;
 function spawnLocalShots(angle, dist, isSuper) {
   if (!net.pred) return;
-  const b = BRAWLERS[myBrawler()];
+  const b = weaponOf(myBrawler(), isSuper ? 0 : net.me.weapon);
   const spec = isSuper ? b.super : b;
   const kind = isSuper ? b.super.kind : b.attack;
   const { x, y } = net.pred;
   if (kind === 'charge') return;
+  if (kind === 'melee') {
+    renderer.addEvent({ k: 'melee', id: app.myId, x, y, a: angle }, performance.now());
+    return;
+  }
   if (kind === 'lob' || kind === 'mega') {
     const d = clamp(dist, isSuper ? 100 : 80, spec.range);
     net.localProjs.push({ i: `L${++localShotId}`, k: 'l', sx: x, sy: y, tx: x + Math.cos(angle) * d, ty: y + Math.sin(angle) * d, p: 0, flight: spec.flight, r: spec.blast, big: isSuper ? 1 : 0 });
@@ -750,9 +774,10 @@ function spawnLocalShots(angle, dist, isSuper) {
   for (let i = 0; i < shots; i++) {
     const a = angle + (shots > 1 ? (i / (shots - 1) - 0.5) * spread : 0);
     net.localProjs.push({
-      i: `L${++localShotId}`, k: kind === 'shotgun' ? 'p' : kind === 'volley' ? 'v' : 'b',
+      i: `L${++localShotId}`, k: kind === 'shotgun' ? 'p' : kind === 'volley' ? 'v' : spec.hitR ? 'o' : 'b',
       x: x + Math.cos(a) * (PLAYER_RADIUS + 4), y: y + Math.sin(a) * (PLAYER_RADIUS + 4),
-      vx: Math.cos(a) * spec.projSpeed, vy: Math.sin(a) * spec.projSpeed, travelled: 0, range: spec.range, pierce: kind === 'volley',
+      vx: Math.cos(a) * spec.projSpeed, vy: Math.sin(a) * spec.projSpeed, travelled: 0, range: spec.range,
+      pierce: kind === 'volley' || Boolean(spec.pierce), hitR: PLAYER_RADIUS + (spec.hitR || 10),
     });
   }
 }
@@ -772,7 +797,7 @@ function stepLocalShots(dt, now) {
       if (isWallAt(pr.x, pr.y)) { renderer.addEvent({ k: 'spark', x: pr.x, y: pr.y }, now); return false; }
       for (const p of players) {
         if (p.isMe || (teams && p.team === net.me.team)) continue;
-        if (!pr.pierce && Math.hypot(p.x - pr.x, p.y - pr.y) <= PLAYER_RADIUS + 10) return false;
+        if (!pr.pierce && Math.hypot(p.x - pr.x, p.y - pr.y) <= pr.hitR) return false;
       }
     }
     return true;
@@ -813,7 +838,7 @@ function buildView(now) {
     players.push({
       id: pb.i, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k), hp: pb.h, maxHp: pb.m, aim: pb.a, cubes: pb.c,
       bush: pb.bush, em: pb.em, dash: pb.d, brawler: info?.brawler ?? 'brick', name: info?.name ?? '', isMe: false,
-      team: pb.t, gems: pb.g, stars: pb.st,
+      team: pb.t, gems: pb.g, stars: pb.st, weapon: pb.wp ?? 0, kx: pb.kx ?? 0, ky: pb.ky ?? 0,
     });
   }
   const selfSnap = latest.pmap.get(app.myId);
@@ -821,7 +846,8 @@ function buildView(now) {
     players.push({
       id: app.myId, ...selfShown, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
       bush: inBush(selfShown.x, selfShown.y) ? 1 : 0, em: selfSnap.em, dash: selfSnap.d, brawler: myBrawler(), name: 'You', isMe: true,
-      team: selfSnap.t, gems: selfSnap.g, stars: selfSnap.st,
+      team: selfSnap.t, gems: selfSnap.g, stars: selfSnap.st, weapon: net.me.weapon ?? 0,
+      kx: net.pred?.kvx ?? 0, ky: net.pred?.kvy ?? 0,
     });
   }
 
@@ -841,15 +867,29 @@ function buildView(now) {
   }).concat(net.localProjs);
 
   // Fire events (damage numbers, explosions, KOs, sounds) when the interpolated time reaches them.
-  while (net.events.length && net.events[0].at <= rt) handleEvent(net.events.shift(), now);
+  while (net.events.length && net.events[0].at <= rt) {
+    const e = net.events.shift();
+    if (rt - e.at < 400) handleEvent(e, now); // stale events are skipped, not played in a burst
+    else if (e.k === 'ko') onKnockout(e); // still keep the kill feed accurate
+  }
 
   return {
-    players, ghosts, projs, cubes: b.cubes, crates: b.crates, haunts: b.haunts, gems: b.gems ?? [],
+    players, ghosts, projs, cubes: lerpItems(a.cubes, b.cubes, k), crates: b.crates, haunts: b.haunts, gems: lerpItems(a.gems, b.gems, k),
     poison: lerp(a.poison, b.poison, k), latest, me: net.me, cam: net.cam, mode: latest.mode ?? 'showdown',
   };
 }
 
+// Loot can be flying, so draw it between snapshots like players.
+function lerpItems(a = [], b = [], k) {
+  const prev = new Map(a.map((it) => [it.i, it]));
+  return b.map((it) => {
+    const p = prev.get(it.i);
+    return p ? { ...it, x: lerp(p.x, it.x, k), y: lerp(p.y, it.y, k) } : it;
+  });
+}
+
 function handleEvent(e, now) {
+  if ((e.k === 'melee' || e.k === 'swap') && e.id === app.myId) return; // already shown the instant we acted
   renderer.addEvent(e, now);
   const vol = e.x != null ? Math.max(0, 1 - Math.hypot(e.x - net.cam.x, e.y - net.cam.y) / 1100) : 1;
   switch (e.k) {
@@ -857,7 +897,9 @@ function handleEvent(e, now) {
       if (e.id === app.myId) { renderer.hurt(now); renderer.shake(e.src === 'hit' ? 12 : 5); sfx.hurt(); }
       else if (e.by === app.myId) sfx.hit();
       break;
-    case 'shot': if (vol > 0) sfx.shot(e.w, vol); break;
+    case 'shot': if (vol > 0 && e.w !== 'melee') sfx.shot(e.w, vol); break;
+    case 'melee': if (vol > 0) sfx.swoosh(vol); break;
+    case 'swap': if (vol > 0.3) sfx.swap(vol * 0.6); break;
     case 'boom': if (vol > 0) { sfx.boom(e.big, vol); renderer.shake((e.big ? 16 : 8) * vol); } break;
     case 'ko': sfx.ko(Math.max(vol, 0.3)); onKnockout(e); break;
     case 'cube': case 'gem': if (e.id === app.myId) sfx.cube(); break;
@@ -929,15 +971,15 @@ function frame(now) {
     const showAim = input.touchMode ? stick.active : true;
     if (showAim) {
       const b = BRAWLERS[me.brawler];
-      let dist = sa.active ? b.super.range : b.range;
+      let dist = sa.active ? b.super.range : weaponOf(me.brawler, net.me.weapon ?? 0).range;
       if (input.touchMode) dist *= stick.frac;
       else dist = mouseAim()?.dist ?? dist;
-      view.aim = { x: me.x, y: me.y, angle: net.aimAngle, dist, brawler: me.brawler, super: sa.active };
+      view.aim = { x: me.x, y: me.y, angle: net.aimAngle, dist, brawler: me.brawler, super: sa.active, weapon: net.me.weapon ?? 0 };
     }
   }
   if (input.touchMode && (me || meGhost)) {
     view.sticks = {
-      left: input.left, right: input.right, superStick: input.superStick, ghost: !!meGhost,
+      left: input.left, right: input.right, superStick: input.superStick, ghost: !!meGhost, brawler: myBrawler(), weapon: net.me.weapon ?? 0,
       hint: app.room?.state === 'playing' && (view.latest.mt < 8 || (meGhost && !input.left)),
     };
   }

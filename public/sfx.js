@@ -15,6 +15,13 @@ function ensure() {
   return ac;
 }
 
+// Silence everything while the page is hidden (other tab, app switched, phone locked).
+document.addEventListener('visibilitychange', () => {
+  if (!ac) return;
+  if (document.hidden) ac.suspend();
+  else ac.resume();
+});
+
 // Browsers only allow audio after a user gesture.
 for (const ev of ['pointerdown', 'keydown']) {
   addEventListener(ev, () => { const c = ensure(); if (c?.state === 'suspended') c.resume(); }, { passive: true });
@@ -27,8 +34,12 @@ export function setMuted(m) {
   if (master) master.gain.value = m ? 0 : 0.5;
 }
 
+let enabled = true; // the game turns this off whenever you're not looking at a match
+export const setGameAudio = (on) => { enabled = on; };
+const silent = () => muted || !enabled || document.hidden;
+
 function tone(freq, dur, { type = 'square', vol = 0.2, to = null, delay = 0 } = {}) {
-  if (muted || !ensure() || ac.state !== 'running') return;
+  if (silent() || !ensure() || ac.state !== 'running') return;
   const t = ac.currentTime + delay;
   const o = ac.createOscillator();
   const g = ac.createGain();
@@ -43,7 +54,7 @@ function tone(freq, dur, { type = 'square', vol = 0.2, to = null, delay = 0 } = 
 }
 
 function noise(dur, { vol = 0.3, freq = 1200, q = 0.8, delay = 0 } = {}) {
-  if (muted || !ensure() || ac.state !== 'running') return;
+  if (silent() || !ensure() || ac.state !== 'running') return;
   const t = ac.currentTime + delay;
   const len = Math.max(1, Math.floor(ac.sampleRate * dur));
   const buf = ac.createBuffer(1, len, ac.sampleRate);
@@ -80,6 +91,8 @@ export const sfx = {
   haunt(v = 1) { tone(400, 0.6, { type: 'sine', vol: 0.18 * v, to: 180 }); tone(410, 0.6, { type: 'sine', vol: 0.12 * v, to: 190 }); },
   beep(high) { tone(high ? 880 : 440, high ? 0.35 : 0.15, { type: 'square', vol: 0.15 }); },
   emote() { tone(700, 0.06, { type: 'triangle', vol: 0.1 }); },
+  swap(v = 1) { tone(520, 0.05, { type: 'square', vol: 0.1 * v }); tone(780, 0.07, { type: 'square', vol: 0.1 * v, delay: 0.05 }); },
+  swoosh(v = 1) { noise(0.16, { vol: 0.35 * v, freq: 2600, q: 0.5 }); tone(160, 0.12, { type: 'sine', vol: 0.15 * v, to: 60, delay: 0.1 }); },
   win() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, { type: 'triangle', vol: 0.18, delay: i * 0.12 })); },
   lose() { [392, 330, 262].forEach((f, i) => tone(f, 0.3, { type: 'triangle', vol: 0.15, delay: i * 0.15 })); },
 };

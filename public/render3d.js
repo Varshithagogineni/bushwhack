@@ -7,7 +7,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { MAP, MAP_TILES, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON, MODES } from '/shared/game.js';
+import { MAP, MAP_TILES, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON, MODES, weaponOf, tileAt } from '/shared/game.js';
 import { Renderer } from './render.js';
 
 const U = 1 / TILE; // game pixels -> world units (1 unit = 1 tile)
@@ -56,6 +56,7 @@ export class Renderer3D extends Renderer {
     this.hauntObjs = new Map();
     this.fx = [];
     this.floaters = [];
+    this.swaps = new Map(); // player id -> { at, w }: recent weapon swaps (spin + icon)
     this.camTarget = new THREE.Vector3(CENTER * U, 0, CENTER * U);
     this.uniforms = { time: { value: 0 } };
     this.setupLights();
@@ -679,7 +680,14 @@ export class Renderer3D extends Renderer {
     const target = Math.PI / 2 - p.aim;
     let d = ((target - e.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
     e.yaw += d * Math.min(1, dt * 18);
-    e.model.rotation.y = e.yaw;
+    const sw = this.swaps.get(p.id);
+    const spin = sw && now - sw.at < 350 ? ((now - sw.at) / 350) * Math.PI * 2 : 0;
+    e.model.rotation.y = e.yaw + spin;
+    const kv = Math.hypot(p.kx || 0, p.ky || 0);
+    const lean = Math.min(1, kv / 1400) * 0.44;
+    e.model.rotation.x = kv ? lean * ((p.ky || 0) / kv) : 0;
+    e.model.rotation.z = kv ? -lean * ((p.kx || 0) / kv) : 0;
+    e.model.scale.set(CHAR_SCALE * (1 + 0.15 * flash), CHAR_SCALE * (1 - 0.15 * flash), CHAR_SCALE * (1 + 0.15 * flash));
     const s = Math.sin(e.phase) * e.walk;
     if (e.piv.legL) e.piv.legL.rotation.x = 0.55 * s;
     if (e.piv.legR) e.piv.legR.rotation.x = -0.55 * s;
@@ -734,24 +742,37 @@ export class Renderer3D extends Renderer {
     if (!this.ready) return;
     const at = new THREE.Vector3(e.x * U, 0, e.y * U);
     const add = (obj, life, update) => { this.scene.add(obj); this.fx.push({ obj, born: now, life, update }); };
-    const burst = (n, color, speed, size, upward, life) => {
+    // Debris with real-ish physics: gravity, one bounce off the ground, spin, then fade.
+    const burst = (n, color, speed, size, upward, life, plank = false) => {
       const g = new THREE.Group();
-      const mat = new THREE.MeshBasicMaterial({ color, transparent: true });
-      const geo = new THREE.IcosahedronGeometry(size, 0);
+      const mat = new THREE.MeshStandardMaterial({ color, transparent: true, roughness: 0.8 });
+      const geo = plank ? new THREE.BoxGeometry(size * 2.6, size * 0.6, size) : new THREE.IcosahedronGeometry(size, 0);
       const parts = Array.from({ length: n }, () => {
         const m = new THREE.Mesh(geo, mat);
         const a = Math.random() * Math.PI * 2;
-        m.userData.v = new THREE.Vector3(Math.cos(a) * speed * (0.5 + Math.random()), upward * (0.5 + Math.random()), Math.sin(a) * speed * (0.5 + Math.random()));
+        const v = speed * (0.5 + Math.random());
+        m.userData = { v: new THREE.Vector3(Math.cos(a) * v, upward * (0.6 + Math.random() * 0.6), Math.sin(a) * v), bounced: false, spin: (Math.random() - 0.5) * 14 };
+        m.castShadow = plank;
         g.add(m);
         return m;
       });
-      g.position.copy(at).setY(0.4);
+      g.position.copy(at).setY(0.35);
+      let last = 0;
       add(g, life, (k) => {
+        const dt = Math.max(0, k * life - last);
+        last = k * life;
         for (const m of parts) {
-          m.position.copy(m.userData.v).multiplyScalar(k * life).add(new THREE.Vector3(0, -4 * (k * life) ** 2, 0));
-          m.rotation.x += 0.2;
+          const u = m.userData;
+          u.v.y -= 14 * dt;
+          m.position.addScaledVector(u.v, dt);
+          if (m.position.y < -0.33) {
+            m.position.y = -0.33;
+            if (!u.bounced) { u.v.y = -u.v.y * 0.3; u.v.x *= 0.5; u.v.z *= 0.5; u.bounced = true; } else { u.v.set(0, 0, 0); u.spin = 0; }
+          }
+          m.rotation.x += u.spin * dt;
+          m.rotation.z += u.spin * 0.7 * dt;
         }
-        mat.opacity = 1 - k;
+        mat.opacity = Math.min(1, (1 - k) * 2.5);
       });
     };
     if (e.k === 'boom') {
@@ -769,11 +790,22 @@ export class Renderer3D extends Renderer {
     } else if (e.k === 'ko') {
       burst(16, '#ffffff', 2.5, 0.09, 3, 0.8);
     } else if (e.k === 'crateBreak') {
-      burst(12, '#b77a3d', 3, 0.1, 4, 0.8);
+      burst(8, '#9a7046', 2.4, 0.09, 4.5, 1.2, true);
     } else if (e.k === 'crate') {
       const c = [...this.crateObjs.values()].find((o) => Math.hypot(o.obj.position.x - at.x, o.obj.position.z - at.z) < 0.3);
       if (c) c.hitAt = now;
+    } else if (e.k === 'melee') {
+      // Haymaker swoosh: a bright arc sweeping in front of the brawler.
+      const b = BRAWLERS.brick.alt;
+      const arc = new THREE.Mesh(new THREE.RingGeometry(0.35, b.range * U, 28, 1, -b.arc, b.arc * 2).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color: '#fff3d0', transparent: true, depthWrite: false, side: THREE.DoubleSide }));
+      arc.position.copy(at).setY(0.5);
+      arc.rotation.y = -e.a;
+      add(arc, 0.28, (k) => { arc.material.opacity = 0.7 * (1 - k); arc.scale.setScalar(0.7 + 0.4 * k); });
+    } else if (e.k === 'swap') {
+      this.swaps.set(e.id, { at: now, w: e.w });
     } else if (e.k === 'haunt' || e.k === 'super' || e.k === 'spawn' || e.k === 'gemspawn') {
+      if (e.k === 'super' && e.w === 'charge') burst(10, '#c9b38a', 2, 0.08, 1.5, 0.7); // dust kicked up by Bulldoze
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 48).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: { haunt: '#be96ff', super: '#ffd63c', spawn: '#7fe3c0', gemspawn: '#c97bff' }[e.k], transparent: true, depthWrite: false }));
       ring.position.copy(at).setY(0.06);
@@ -866,6 +898,14 @@ export class Renderer3D extends Renderer {
       stop: () => { running = false; },
     };
     return stage;
+  }
+
+  splash(x, y, now) {
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.16, 24).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, depthWrite: false }));
+    ring.position.set(x * U, 0.05, y * U);
+    this.scene.add(ring);
+    this.fx.push({ obj: ring, born: now, life: 0.5, update: (k) => { ring.scale.setScalar(1 + k * 4); ring.material.opacity = 0.8 * (1 - k); } });
   }
 
   // ------------------------------------------------------------ projection helpers (used by input/aim)
@@ -980,6 +1020,7 @@ export class Renderer3D extends Renderer {
       b: new THREE.MeshBasicMaterial({ color: '#fff3a8' }),
       p: new THREE.MeshBasicMaterial({ color: '#ffb347' }),
       v: new THREE.MeshBasicMaterial({ color: '#7fe9ff' }),
+      o: new THREE.MeshStandardMaterial({ color: '#b5653a', roughness: 0.7 }),
       bomb: new THREE.MeshStandardMaterial({ color: '#222228', roughness: 0.3 }),
       bigbomb: new THREE.MeshStandardMaterial({ color: '#7a1010', roughness: 0.3 }),
       zone: new THREE.MeshBasicMaterial({ color: '#ff3b3b', transparent: true, opacity: 0.22, depthWrite: false }),
@@ -997,7 +1038,7 @@ export class Renderer3D extends Renderer {
         this.scene.add(obj);
         return { obj, lob: true };
       }
-      const r = p.k === 'p' ? 0.09 : 0.12;
+      const r = p.k === 'p' ? 0.09 : p.k === 'o' ? 0.24 : 0.12;
       const core = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), bulletMats[p.k]);
       const glow = new THREE.Sprite(this.glowMat(p.k));
       glow.scale.setScalar(r * 6);
@@ -1012,7 +1053,12 @@ export class Renderer3D extends Renderer {
         o.obj.userData.zone.material.opacity = 0.15 + 0.15 * Math.sin(now / 60);
         return;
       }
-      o.obj.position.set(p.x * U, 0.75, p.y * U);
+      o.obj.position.set(p.x * U, p.k === 'o' ? 0.26 : 0.75, p.y * U);
+      if (p.k === 'o') o.obj.rotation.x += 0.4; // the Bowler rolls
+      // Splash where shots cross a pond (once per crossing).
+      const wet = tileAt(p.x, p.y) === 'w';
+      if (wet && !o.wet) this.splash(p.x, p.y, now);
+      o.wet = wet;
     });
 
     // Gems and the mine they come from
@@ -1069,7 +1115,7 @@ export class Renderer3D extends Renderer {
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const g = c.getContext('2d');
-    const col = { b: '255,225,77', p: '255,138,0', v: '40,200,255', g: '190,110,255' }[kind];
+    const col = { b: '255,225,77', p: '255,138,0', v: '40,200,255', g: '190,110,255', o: '255,150,80' }[kind];
     const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
     grd.addColorStop(0, `rgba(${col},0.9)`);
     grd.addColorStop(1, `rgba(${col},0)`);
@@ -1083,16 +1129,16 @@ export class Renderer3D extends Renderer {
 
   updateAim(a) {
     if (!a) { if (this.aimObj) this.aimObj.visible = false; return; }
-    const b = BRAWLERS[a.brawler];
+    const b = weaponOf(a.brawler, a.super ? 0 : a.weapon || 0);
     const kind = a.super ? b.super.kind : b.attack;
-    const key = `${a.brawler}:${a.super}`;
+    const key = `${a.brawler}:${a.super}:${a.weapon || 0}`;
     if (this.aimKey !== key) {
       if (this.aimObj) this.scene.remove(this.aimObj);
       const mat = new THREE.MeshBasicMaterial({ color: a.super ? '#ffd63c' : '#ffffff', transparent: true, opacity: 0.28, depthWrite: false });
       const range = (a.super ? b.super.range : b.range) * U;
       const g = new THREE.Group();
-      if (kind === 'shotgun' || kind === 'volley') {
-        const spread = kind === 'volley' ? b.super.spread : b.spread;
+      if (kind === 'shotgun' || kind === 'volley' || kind === 'melee') {
+        const spread = kind === 'volley' ? b.super.spread : kind === 'melee' ? b.arc * 2 : b.spread;
         g.add(new THREE.Mesh(new THREE.CircleGeometry(range, 32, -spread / 2, spread).rotateX(-Math.PI / 2), mat));
       } else if (kind === 'bullet' || kind === 'charge') {
         const w = (kind === 'charge' ? 52 : 18) * U;
@@ -1164,14 +1210,29 @@ export class Renderer3D extends Renderer {
         ctx.fillText(badge, s.x, s.y - 36);
       }
       if (p.em != null) this.bubbleAt(s.x, s.y - (badge ? 56 : 36), EMOTES[p.em]);
+      const sw = this.swaps.get(p.id);
+      if (sw && now - sw.at < 1000) {
+        ctx.font = '26px system-ui';
+        ctx.globalAlpha = 1 - (now - sw.at) / 1000;
+        ctx.fillText(weaponOf(p.brawler, sw.w).icon, s.x, s.y - (badge ? 80 : 58));
+        ctx.globalAlpha = 1;
+      }
       if (p.isMe && v.me) {
         const f = this.toScreen(null, p.x, p.y, 0);
+        const w = weaponOf(p.brawler, p.weapon || 0);
+        ctx.font = '15px "Patrick Hand", system-ui';
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = 'rgba(40,28,18,0.85)';
+        ctx.fillStyle = p.weapon ? '#ffcf7a' : '#f6eedb';
+        const label = `${w.icon} ${w.weapon}${this.touch ? '' : ' · Q'}`;
+        ctx.strokeText(label, f.x, f.y + 46);
+        ctx.fillText(label, f.x, f.y + 46);
         const seg = 18, gap = 3, total = MAX_AMMO * seg + (MAX_AMMO - 1) * gap;
         for (let i = 0; i < MAX_AMMO; i++) {
           const x = f.x - total / 2 + i * (seg + gap);
           ctx.fillStyle = 'rgba(0,0,0,0.6)';
           ctx.fillRect(x, f.y + 22, seg, 6);
-          ctx.fillStyle = '#ff9f1a';
+          ctx.fillStyle = p.weapon ? '#ffcf7a' : '#ff9f1a';
           ctx.fillRect(x, f.y + 22, seg * Math.max(0, Math.min(1, v.me.ammo - i)), 6);
         }
       }
@@ -1211,6 +1272,7 @@ export class Renderer3D extends Renderer {
       ctx.fillText(text, x, y);
       ctx.globalAlpha = 1;
     }
+    this.touch = Boolean(v.sticks);
     this.drawArrows3D(v);
     this.drawHurt(now);
     if (v.sticks) this.drawSticks(v.sticks, v.me);
