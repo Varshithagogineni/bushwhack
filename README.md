@@ -26,6 +26,18 @@ Friends join by scanning the lobby QR code, opening the invite link, or typing t
 
 The host can add bots, so two people (or one) can start a match right away.
 
+## Art pipeline
+
+Everything you see is modelled in code with Blender and rendered live in the browser with Three.js:
+
+- `tools/blender/build_assets.py` builds the brawlers, props and island (and renders 2D sprite fallbacks).
+- `tools/blender/export_models.py` exports them as glTF models with generated textures, plus the island's colour map and water mask.
+- `public/render3d.js` draws the real-time scene: sun and soft shadows, animated water with caustics and surf, swaying grass, poison gas, 3D projectiles and explosions. Devices without WebGL fall back to the sprite renderer.
+
+```bash
+/Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P tools/blender/export_models.py -- public/models
+```
+
 ## How it stays in sync
 
 - One Node.js server runs the authoritative simulation at 30 ticks/second and sends each player a snapshot every tick (about 400 bytes).

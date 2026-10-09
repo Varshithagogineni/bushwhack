@@ -43,7 +43,20 @@ const net = {
 };
 
 const canvas = $('canvas');
-const renderer = new Renderer(canvas);
+let renderer = new Renderer(canvas);
+// Upgrade to the real-time 3D renderer when WebGL works; the 2D one stays as the fallback.
+try {
+  const probe = document.createElement('canvas');
+  if (probe.getContext('webgl2') || probe.getContext('webgl')) {
+    import('./render3d.js')
+      .then(async ({ Renderer3D }) => {
+        const r3 = new Renderer3D(canvas);
+        await r3.load();
+        renderer = r3;
+      })
+      .catch((e) => console.warn('3D renderer unavailable, using 2D.', e));
+  }
+} catch { /* no WebGL */ }
 const input = new Input(canvas);
 input.onFire = (intent) => tryFire(intent);
 input.onSuper = (intent) => trySuper(intent);
@@ -335,12 +348,25 @@ function selfScreenPos() {
   return renderer.toScreen(net.cam, net.pred.x + net.err.x, net.pred.y + net.err.y);
 }
 
+// Angle and distance from your brawler to the mouse, measured on the ground.
+function mouseAim() {
+  if (!net.pred) return null;
+  const me = { x: net.pred.x + net.err.x, y: net.pred.y + net.err.y };
+  if (renderer.groundPoint) {
+    const g = renderer.groundPoint(input.mouse.x, input.mouse.y);
+    if (!g) return null;
+    return { angle: Math.atan2(g.y - me.y, g.x - me.x), dist: Math.hypot(g.x - me.x, g.y - me.y) };
+  }
+  const s = selfScreenPos();
+  return { angle: Math.atan2(input.mouse.y - s.y, input.mouse.x - s.x), dist: Math.hypot(input.mouse.x - s.x, input.mouse.y - s.y) / renderer.scale };
+}
+
 function updateAim(mx, my) {
   const ta = input.superAim().active ? input.superAim() : input.touchAim();
   if (ta.active) net.aimAngle = ta.angle;
   else if (!input.touchMode) {
-    const s = selfScreenPos();
-    if (s) net.aimAngle = Math.atan2(input.mouse.y - s.y, input.mouse.x - s.x);
+    const m = mouseAim();
+    if (m) net.aimAngle = m.angle;
   } else if (Math.hypot(mx, my) > 0.2) net.aimAngle = Math.atan2(my, mx);
 }
 
@@ -360,10 +386,10 @@ function aimFor(intent, range) {
     angle = intent.angle;
     dist = intent.frac * range;
   } else if (intent.mouse) {
-    const s = selfScreenPos();
-    if (!s) return null;
-    angle = Math.atan2(input.mouse.y - s.y, input.mouse.x - s.x);
-    dist = Math.hypot(input.mouse.x - s.x, input.mouse.y - s.y) / renderer.scale;
+    const m = mouseAim();
+    if (!m) return null;
+    angle = m.angle;
+    dist = m.dist;
   }
   return { angle, dist };
 }
@@ -533,10 +559,7 @@ function frame(now) {
       const b = BRAWLERS[me.brawler];
       let dist = sa.active ? b.super.range : b.range;
       if (input.touchMode) dist *= stick.frac;
-      else {
-        const s = renderer.toScreen(net.cam, me.x, me.y);
-        dist = Math.hypot(input.mouse.x - s.x, input.mouse.y - s.y) / renderer.scale;
-      }
+      else dist = mouseAim()?.dist ?? dist;
       view.aim = { x: me.x, y: me.y, angle: net.aimAngle, dist, brawler: me.brawler, super: sa.active };
     }
   }

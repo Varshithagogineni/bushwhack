@@ -208,7 +208,6 @@ export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.layers = buildLayers();
     this.effects = [];
     this.flashes = new Map(); // player id -> time hit
     this.motion = new Map(); // player id -> last position, for walk cycles
@@ -216,6 +215,12 @@ export class Renderer {
     this.hurtAt = -1e9;
     this.resize();
     addEventListener('resize', () => this.resize());
+  }
+
+  // Vector fallback layers are only built if the sprite art and 3D renderer are both unavailable.
+  get layers() {
+    this._layers ??= buildLayers();
+    return this._layers;
   }
 
   resize() {

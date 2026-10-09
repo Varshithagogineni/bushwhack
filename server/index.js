@@ -8,6 +8,7 @@ import { Room, send } from './room.js';
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const SHARED_DIR = path.join(ROOT, 'shared');
+const THREE_DIR = path.join(ROOT, 'node_modules', 'three');
 const PORT = Number(process.env.PORT) || 3000;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I/O, so codes are easy to read aloud
 
@@ -20,6 +21,7 @@ const MIME = {
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
   '.json': 'application/json',
+  '.glb': 'model/gltf-binary',
 };
 
 const server = http.createServer(async (req, res) => {
@@ -31,14 +33,14 @@ const server = http.createServer(async (req, res) => {
   let file;
   try {
     const rel = decodeURIComponent(pathname);
-    file = rel.startsWith('/shared/')
-      ? path.join(ROOT, rel)
-      : path.join(PUBLIC_DIR, rel === '/' ? 'index.html' : rel);
+    file = rel.startsWith('/shared/') ? path.join(ROOT, rel)
+      : rel.startsWith('/vendor/three/') ? path.join(THREE_DIR, rel.slice('/vendor/three/'.length))
+        : path.join(PUBLIC_DIR, rel === '/' ? 'index.html' : rel);
   } catch {
     res.writeHead(400);
     return res.end();
   }
-  if (!file.startsWith(PUBLIC_DIR + path.sep) && !file.startsWith(SHARED_DIR + path.sep)) {
+  if (![PUBLIC_DIR, SHARED_DIR, THREE_DIR].some((dir) => file.startsWith(dir + path.sep))) {
     res.writeHead(404);
     return res.end('Not found');
   }
@@ -46,7 +48,7 @@ const server = http.createServer(async (req, res) => {
     const data = await readFile(file);
     res.writeHead(200, {
       'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': file.startsWith(THREE_DIR) ? 'public, max-age=604800' : 'no-cache',
     });
     res.end(data);
   } catch {
