@@ -46,32 +46,34 @@ Everything you see is modelled in code with Blender and rendered live in the bro
 
 ## Accounts, trophies and badges (optional)
 
-Guests can always play straight away. Signing in (username + password, stored as a salted scrypt hash) saves:
-trophies (Brawl Stars-style: up for wins and high placements, down for losses), wins/losses, knockouts and streaks per
-mode and per brawler, and 20 badges, all shown on the Profile page with a leaderboard.
+Guests can always play straight away. Signing in (username + password, bcrypt-hashed in Postgres) saves trophies
+(Brawl Stars-style: up for wins and high placements, down for losses), wins/losses, knockouts and streaks per mode and
+per brawler, and 20 badges, shown on the Profile page with a leaderboard. Accounts live in Supabase; the browser can
+only call the `bw_*` database functions (see `supabase/`).
 
-Accounts live in `data/accounts.json` locally. On hosts without a persistent disk (like Render's free tier), set
-`SUPABASE_URL` and `SUPABASE_SERVICE_KEY` and run `server/schema.sql` once in Supabase so accounts survive restarts.
+## How it works (100% free tier: Vercel + Supabase)
 
-## How it stays in sync
+- **No game server.** The room creator's browser runs the authoritative match (`shared/room.js`) in a Web Worker at
+  30 ticks/second. Everyone else connects **directly** to it over WebRTC data channels: an unreliable lane for
+  snapshots and inputs (no head-of-line stalls) and a reliable lane for everything else.
+- **Supabase Realtime is only the phone book:** the 4-letter room code is a channel used for the WebRTC handshake.
+  If a network blocks direct connections, traffic falls back to a 15 Hz relay through the same channel.
+- **Vercel** serves the static game (`npm run build` → `dist/`) and runs a daily cron that keeps the free Supabase
+  project awake.
+- Your own movement is predicted locally with the same physics as the host (`shared/game.js`) and reconciled;
+  everyone else is drawn 80 ms in the past, interpolated between snapshots. Your shots appear instantly and the host
+  fast-forwards them by your measured lag, so what you saw hit is what counts. The host decides who can see whom
+  (bushes), so hidden players are never sent to opponents.
 
-- One Node.js server runs the authoritative simulation at 30 ticks/second and sends each player a snapshot every tick (about 400 bytes).
-- Your own brawler is predicted locally with the same movement code as the server (`shared/game.js`), then reconciled against the server, so controls feel instant.
-- Everyone else is drawn 80 ms in the past, interpolated between snapshots, so motion is smooth even on shaky connections.
-- Your own shots appear the instant you fire; the server fast-forwards them by your measured lag (capped at 150 ms), so what you saw hit is what counts.
-- The server decides who can see whom (bushes), so hidden players are never sent to opponents.
-- Dropped phones can rejoin the same seat within 30 seconds (refresh-safe).
+The host's tab must stay open: if the host leaves, the room closes and everyone returns to the home screen.
 
 ## Run locally
 
 ```bash
 npm install
-npm start          # http://localhost:3000
+npm start          # http://localhost:3000  (static dev server; multiplayer still uses Supabase for the handshake)
+npm run build      # what Vercel deploys, in dist/
 ```
 
-Phones on the same Wi-Fi can join via `http://<your-computer-ip>:3000`.
+Live: https://bushwhack.vercel.app
 
-## Deploy
-
-Any host that runs a long-lived Node process with WebSockets works. `render.yaml` deploys it to Render's free tier.
-`.github/workflows/keep-awake.yml` pings the server every 10 minutes so the free instance never goes to sleep; set the repo variable `GAME_URL` to your Render URL to turn it on.
