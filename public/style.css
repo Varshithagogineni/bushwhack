@@ -104,6 +104,12 @@ kbd { background: rgba(255, 255, 255, 0.15); border-radius: 5px; padding: 1px 5p
 .room-code .label { color: var(--muted); font-weight: 600; }
 .room-code strong { font-size: 2.4rem; letter-spacing: 8px; color: var(--accent); font-weight: 900; }
 .hint { color: var(--muted); font-size: 0.9rem; margin: 10px 0 0; }
+.invite { display: flex; gap: 14px; align-items: center; margin-top: 12px; }
+.invite .hint { margin: 0; }
+.qr { width: 104px; height: 104px; flex: none; background: #fff; border-radius: 10px; padding: 4px; }
+.qr svg { width: 100%; height: 100%; display: block; }
+.card .super { font-size: 0.78rem; font-weight: 800; color: var(--accent); margin-top: 4px; }
+.card .super-desc { min-height: 0; }
 
 .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .card {
@@ -148,6 +154,7 @@ kbd { background: rgba(255, 255, 255, 0.15); border-radius: 5px; padding: 1px 5p
 .players .tag { font-size: 0.72rem; font-weight: 800; padding: 2px 8px; border-radius: 99px; background: rgba(255, 255, 255, 0.12); color: var(--muted); }
 .players .tag.host { background: var(--accent); color: #1b1430; }
 .players .tag.you { background: var(--green); color: #10351d; }
+.players .tag.wins { background: rgba(255, 205, 60, 0.18); color: var(--accent); }
 .players li.offline { opacity: 0.5; }
 .host-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .host-controls .big { grid-column: 1 / -1; }
@@ -199,6 +206,54 @@ kbd { background: rgba(255, 255, 255, 0.15); border-radius: 5px; padding: 1px 5p
   color: var(--accent);
   text-shadow: 0 5px 0 rgba(0, 0, 0, 0.5);
 }
+#superHint {
+  position: absolute;
+  bottom: max(64px, calc(env(safe-area-inset-bottom) + 56px));
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  text-align: center;
+  font-weight: 900;
+  color: #1b1430;
+  background: var(--accent);
+  padding: 8px 16px;
+  border-radius: 99px;
+  white-space: nowrap;
+}
+#superHint:not(:empty) { animation: pulse 0.8s infinite alternate; }
+#superHint:empty { display: none; }
+@keyframes pulse { from { opacity: 0.75; } to { opacity: 1; } }
+#hudButtons {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: max(10px, env(safe-area-inset-left));
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  pointer-events: auto;
+}
+.hud-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 0;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 1.2rem;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#emoteTray { display: flex; gap: 6px; background: rgba(0, 0, 0, 0.6); padding: 6px; border-radius: 99px; }
+#emoteTray button {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 0;
+  background: #fff;
+  font-size: 1.1rem;
+  font-weight: 900;
+  cursor: pointer;
+  touch-action: manipulation;
+}
 #spectateMsg {
   position: absolute;
   bottom: max(16px, env(safe-area-inset-bottom));
@@ -207,7 +262,7 @@ kbd { background: rgba(255, 255, 255, 0.15); border-radius: 5px; padding: 1px 5p
   text-align: center;
   font-weight: 800;
 }
-#spectateMsg:not(:empty) span { background: rgba(0, 0, 0, 0.6); padding: 8px 14px; border-radius: 99px; }
+#spectateMsg:not(:empty) span { display: inline-block; max-width: calc(100% - 32px); background: rgba(0, 0, 0, 0.6); padding: 8px 14px; border-radius: 18px; font-size: 0.95rem; }
 @media (max-width: 700px) { #killFeed { top: 52px; } }
 
 #results {
@@ -235,6 +290,7 @@ kbd { background: rgba(255, 255, 255, 0.15); border-radius: 5px; padding: 1px 5p
 #resultList li.me { outline: 2px solid var(--green); }
 #resultList .rank { width: 30px; color: var(--accent); font-weight: 900; }
 #resultList .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#resultList .wins { color: var(--accent); font-size: 0.85rem; }
 
 #net, #toast {
   position: fixed;

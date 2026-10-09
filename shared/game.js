@@ -25,6 +25,12 @@ export const CUBE_PICKUP = 44;
 export const START_CUBES = 6;
 export const COUNTDOWN = 3;
 export const POISON = { start: 20, end: 110, startR: 1420, endR: 150, dps: 900 };
+export const CRATE_R = 28;
+export const CRATE_HP = 2600;
+export const GHOST_SPEED = 300;
+// Ghost Mode: knocked-out players float through walls and drop haunts that slow and hurt survivors.
+export const HAUNT = { radius: 85, life: 3, cooldown: 5, slow: 0.5, dps: 220 };
+export const EMOTES = ['👍', '😂', '😡', 'GG'];
 
 export const BRAWLERS = {
   brick: {
@@ -32,6 +38,7 @@ export const BRAWLERS = {
     desc: 'Short-range shotgun blast. Huge health pool.',
     hp: 5800, speed: 225, reload: 1.5,
     attack: 'shotgun', range: 320, pellets: 5, spread: 0.55, damage: 360, projSpeed: 1150,
+    super: { kind: 'charge', name: 'Bulldoze', desc: 'Charge forward, smashing enemies and crates', range: 380, speed: 1150, damage: 1500, charge: 2600 },
     stats: { health: 5, range: 1, damage: 4 },
   },
   vex: {
@@ -39,6 +46,7 @@ export const BRAWLERS = {
     desc: 'Long-range piercing shot. Fragile up close.',
     hp: 3000, speed: 255, reload: 1.35,
     attack: 'bullet', range: 760, damage: 1150, projSpeed: 1500,
+    super: { kind: 'volley', name: 'Piercing Volley', desc: 'Five shots that pierce through enemies', shots: 5, spread: 0.32, range: 860, damage: 950, projSpeed: 1700, charge: 3000 },
     stats: { health: 2, range: 5, damage: 3 },
   },
   boom: {
@@ -46,6 +54,7 @@ export const BRAWLERS = {
     desc: 'Lobs bombs over walls. Splash damage.',
     hp: 3400, speed: 245, reload: 1.75,
     attack: 'lob', range: 560, damage: 1300, blast: 85, flight: 0.65,
+    super: { kind: 'mega', name: 'Mega Bomb', desc: 'A huge bomb with a massive blast', range: 640, damage: 2300, blast: 150, flight: 0.9, charge: 2800 },
     stats: { health: 3, range: 4, damage: 4 },
   },
 };
@@ -133,15 +142,49 @@ export function resolveWalls(p, radius) {
   }
 }
 
-// Move one fixed tick. (mx, my) is the joystick vector, length <= 1.
-export function movePlayer(p, mx, my, speed) {
+// Push a circle out of round solids (crates).
+export function resolveCircles(p, radius, solids) {
+  for (const s of solids) {
+    const dx = p.x - s.x, dy = p.y - s.y;
+    const min = radius + CRATE_R;
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= min * min) continue;
+    const d = Math.sqrt(d2);
+    if (d < 1e-6) { p.x += min; continue; }
+    p.x = s.x + (dx / d) * min;
+    p.y = s.y + (dy / d) * min;
+  }
+}
+
+// Move one fixed tick. (mx, my) is the joystick vector, length <= 1. `solids` are crates.
+export function movePlayer(p, mx, my, speed, solids = []) {
   const len = Math.hypot(mx, my);
   if (len < 0.05) return;
   if (len > 1) { mx /= len; my /= len; }
   p.x += mx * speed * DT;
   resolveWalls(p, PLAYER_RADIUS);
+  resolveCircles(p, PLAYER_RADIUS, solids);
   p.y += my * speed * DT;
   resolveWalls(p, PLAYER_RADIUS);
+  resolveCircles(p, PLAYER_RADIUS, solids);
+  resolveWalls(p, PLAYER_RADIUS);
+}
+
+// Ghosts drift through walls and crates; only the arena edge stops them.
+export function moveGhost(p, mx, my) {
+  const len = Math.hypot(mx, my);
+  if (len < 0.05) return;
+  if (len > 1) { mx /= len; my /= len; }
+  p.x = clamp(p.x + mx * GHOST_SPEED * DT, PLAYER_RADIUS, WORLD - PLAYER_RADIUS);
+  p.y = clamp(p.y + my * GHOST_SPEED * DT, PLAYER_RADIUS, WORLD - PLAYER_RADIUS);
+}
+
+// Haunts slow anyone standing in them.
+export function speedFactor(x, y, haunts) {
+  for (const h of haunts) {
+    if (Math.hypot(x - h.x, y - h.y) < h.r) return HAUNT.slow;
+  }
+  return 1;
 }
 
 // Inputs travel as 2-decimal numbers; both sides must predict with the identical rounded values.
@@ -177,6 +220,18 @@ export function nearestFloor(x, y) {
     }
   }
   return { x: CENTER, y: CENTER };
+}
+
+// Crate spots in one quadrant (row, col), mirrored four ways like the map.
+const CRATE_TILES = [[6, 6], [11, 7], [2, 4]];
+export function crateSpots() {
+  const spots = [];
+  for (const [r, c] of CRATE_TILES) {
+    for (const [rr, cc] of [[r, c], [r, MAP_TILES - 1 - c], [MAP_TILES - 1 - r, c], [MAP_TILES - 1 - r, MAP_TILES - 1 - c]]) {
+      spots.push({ x: cc * TILE + TILE / 2, y: rr * TILE + TILE / 2 });
+    }
+  }
+  return spots;
 }
 
 export function spawnPoints(n) {

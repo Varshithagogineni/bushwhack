@@ -1,8 +1,10 @@
 import {
-  DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, movePlayer, round2, inBush,
+  DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES,
+  movePlayer, moveGhost, speedFactor, round2, inBush,
 } from '/shared/game.js';
 import { Input } from './input.js';
 import { Renderer, drawBrawler } from './render.js';
+import { sfx, isMuted, setMuted } from './sfx.js';
 
 const INTERP_MS = 100; // render other players this far in the past so motion stays smooth
 const CLIENT_COOLDOWN = 0.45;
@@ -30,11 +32,12 @@ const app = {
 
 const net = {
   snaps: [], offset: null, events: [], pending: [], seq: 0, pred: null, err: { x: 0, y: 0 },
-  me: { alive: false, ammo: MAX_AMMO, cubes: 0 }, cooldown: 0, lastState: null,
+  me: { alive: false, ghost: false, ammo: MAX_AMMO, cubes: 0, su: 0, hcd: 0 }, cooldown: 0, lastState: null,
   killedBy: null, cam: { x: CENTER, y: CENTER }, aimAngle: 0, fightShownAt: 0, view: null,
+  lastBeep: null, resultSoundFor: null, wasGhost: false,
   reset() {
     this.snaps = []; this.events = []; this.pending = []; this.pred = null; this.err = { x: 0, y: 0 };
-    this.killedBy = null; this.cooldown = 0;
+    this.killedBy = null; this.cooldown = 0; this.lastBeep = null; this.wasGhost = false;
   },
 };
 
@@ -42,6 +45,8 @@ const canvas = $('canvas');
 const renderer = new Renderer(canvas);
 const input = new Input(canvas);
 input.onFire = (intent) => tryFire(intent);
+input.onSuper = (intent) => trySuper(intent);
+input.onEmote = (n) => sendEmote(n);
 
 // ---------- networking ----------
 
@@ -117,13 +122,16 @@ const playerById = (id) => app.room?.players.find((p) => p.id === id);
 const nameOf = (id) => (id === app.myId ? 'You' : playerById(id)?.name ?? '???');
 const myBrawler = () => playerById(app.myId)?.brawler ?? BRAWLER_IDS[0];
 const myName = () => ($('nameInput').value.trim() || local.get('bw_name') || 'Brawler').slice(0, 14);
+const inviteUrl = () => `${location.origin}${location.pathname}?room=${app.code}`;
 
 function onRoom(room) {
   const prev = app.room?.state;
+  const prevCode = app.room?.code;
   app.room = room;
   if (room.state === 'lobby') {
     showScreen('lobby');
     renderLobby();
+    if (prevCode !== room.code) renderQr();
   } else {
     if (prev === 'lobby' || prev == null) { net.reset(); input.reset(); }
     showScreen('game');
@@ -145,10 +153,8 @@ function buildCards() {
     const ictx = icon.getContext('2d');
     ictx.scale(2, 2);
     drawBrawler(ictx, 28, 30, id, 0.4);
-    const name = Object.assign(document.createElement('div'), { className: 'name', textContent: b.name });
-    const role = Object.assign(document.createElement('div'), { className: 'role', textContent: b.role });
-    const desc = Object.assign(document.createElement('div'), { className: 'desc', textContent: b.desc });
-    card.append(icon, name, role, desc);
+    const el = (cls, text) => Object.assign(document.createElement('div'), { className: cls, textContent: text });
+    card.append(icon, el('name', b.name), el('role', b.role), el('desc', b.desc));
     for (const [label, val] of Object.entries(b.stats)) {
       const row = document.createElement('div');
       row.className = 'stat';
@@ -156,6 +162,7 @@ function buildCards() {
       row.firstChild.textContent = label;
       card.append(row);
     }
+    card.append(el('super', `⚡ ${b.super.name}`), el('desc super-desc', b.super.desc));
     card.addEventListener('click', () => {
       const me = playerById(app.myId);
       if (me) me.brawler = id;
@@ -163,6 +170,21 @@ function buildCards() {
       renderLobby();
     });
     wrap.append(card);
+  }
+}
+
+function renderQr() {
+  const box = $('qr');
+  box.innerHTML = '';
+  if (!app.code || typeof window.qrcode !== 'function') { box.classList.add('hidden'); return; }
+  try {
+    const qr = window.qrcode(0, 'M');
+    qr.addData(inviteUrl());
+    qr.make();
+    box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+    box.classList.remove('hidden');
+  } catch {
+    box.classList.add('hidden');
   }
 }
 
@@ -186,6 +208,7 @@ function renderLobby() {
     who.textContent = `${p.name} · ${BRAWLERS[p.brawler].name}`;
     li.append(dot, who);
     const tag = (text, cls) => li.append(Object.assign(document.createElement('span'), { className: `tag ${cls}`, textContent: text }));
+    if (p.wins) tag(`🏆 ${p.wins}`, 'wins');
     if (p.id === app.myId) tag('YOU', 'you');
     if (p.id === room.hostId) tag('HOST', 'host');
     if (!p.connected && !p.bot) tag('offline', '');
@@ -218,26 +241,40 @@ function renderResults() {
   for (const r of room.results) {
     const li = document.createElement('li');
     if (r.id === app.myId) li.classList.add('me');
-    const rank = Object.assign(document.createElement('span'), { className: 'rank', textContent: `#${r.rank}` });
-    const dot = Object.assign(document.createElement('span'), { className: 'dot' });
-    dot.style.cssText = `width:18px;height:18px;border-radius:50%;background:${BRAWLERS[r.brawler].color}`;
-    const who = Object.assign(document.createElement('span'), { className: 'who', textContent: r.id === app.myId ? `${r.name} (you)` : r.name });
-    const kills = Object.assign(document.createElement('span'), { className: 'muted', textContent: `${r.kills} KO${r.kills === 1 ? '' : 's'}` });
-    li.append(rank, dot, who, kills);
+    const span = (cls, text) => Object.assign(document.createElement('span'), { className: cls, textContent: text });
+    const dot = span('dot', '');
+    dot.style.cssText = `width:18px;height:18px;border-radius:50%;flex:none;background:${BRAWLERS[r.brawler].color}`;
+    li.append(
+      span('rank', `#${r.rank}`), dot, span('who', r.id === app.myId ? `${r.name} (you)` : r.name),
+      span('muted', `${r.kills} KO${r.kills === 1 ? '' : 's'}`), span('wins', `🏆 ${r.wins}`),
+    );
     list.append(li);
   }
   const isHost = room.hostId === app.myId;
   $('againBtn').classList.toggle('hidden', !isHost);
   $('againHint').textContent = isHost ? '' : 'Waiting for the host… (back to lobby automatically in a few seconds)';
+  if (net.resultSoundFor !== room.results) {
+    net.resultSoundFor = room.results;
+    if (mine) (mine.rank === 1 ? sfx.win : sfx.lose)();
+  }
 }
 
 // ---------- snapshots, prediction, interpolation ----------
+
+const latestSnap = () => net.snaps[net.snaps.length - 1];
+
+// Move our own predicted position one tick, exactly as the server will.
+function predictStep(p, mx, my, snap) {
+  if (net.me.ghost) moveGhost(p, mx, my);
+  else movePlayer(p, mx, my, BRAWLERS[myBrawler()].speed * speedFactor(p.x, p.y, snap?.haunts ?? []), snap?.crates ?? []);
+}
 
 function onSnap(m) {
   if (m.state === 'countdown' && net.lastState !== 'countdown') net.reset();
   net.lastState = m.state;
   m.pmap = new Map(m.players.map((p) => [p.i, p]));
   m.prmap = new Map(m.projs.map((p) => [p.i, p]));
+  m.gmap = new Map(m.ghosts.map((g) => [g.i, g]));
   net.snaps.push(m);
   if (net.snaps.length > 40) net.snaps.shift();
 
@@ -245,30 +282,42 @@ function onSnap(m) {
   if (net.offset === null || Math.abs(est - net.offset) > 400) net.offset = est;
   else net.offset += (est - net.offset) * 0.06;
 
+  const prevSu = net.me.su ?? 0;
   net.me = m.me;
-  const self = m.pmap.get(app.myId);
-  if (self) {
+  if (m.me.alive && prevSu < 1 && m.me.su >= 1) sfx.superReady();
+  if (m.me.ghost !== net.wasGhost) { net.wasGhost = m.me.ghost; net.pred = null; net.pending = []; }
+
+  const self = m.me.ghost ? m.gmap.get(app.myId) : m.pmap.get(app.myId);
+  if (self && !(m.players.find((p) => p.i === app.myId)?.d)) {
     // Server says where we were after input #ack; replay the inputs it hasn't seen yet.
     const shown = net.pred ? { x: net.pred.x + net.err.x, y: net.pred.y + net.err.y } : null;
     net.pending = net.pending.filter((i) => i.seq > m.me.ack);
     const p = { x: self.x, y: self.y };
-    const speed = BRAWLERS[myBrawler()].speed;
-    for (const i of net.pending) movePlayer(p, i.mx, i.my, speed);
+    for (const i of net.pending) predictStep(p, i.mx, i.my, m);
     net.pred = p;
     if (shown) {
       net.err.x = shown.x - p.x;
       net.err.y = shown.y - p.y;
       if (Math.hypot(net.err.x, net.err.y) > 150) net.err = { x: 0, y: 0 };
     }
+  } else if (self) {
+    // Mid-charge: just follow the server.
+    net.pred = { x: self.x, y: self.y };
+    net.pending = [];
+    net.err = { x: 0, y: 0 };
   } else {
     net.pred = null;
   }
   for (const e of m.ev) net.events.push({ ...e, at: m.time * 1000 });
 }
 
+function canAct() {
+  return app.room?.state === 'playing' && net.lastState === 'playing' && (net.me.alive || net.me.ghost) && net.pred;
+}
+
 function stepInput() {
   net.cooldown = Math.max(0, net.cooldown - DT);
-  if (app.room?.state !== 'playing' || net.lastState !== 'playing' || !net.me.alive || !net.pred) return;
+  if (!canAct()) return;
   const { mx: rx, my: ry } = input.move();
   const mx = round2(rx), my = round2(ry);
   updateAim(mx, my);
@@ -276,8 +325,8 @@ function stepInput() {
   send({ t: 'i', s: net.seq, x: mx, y: my, a: round2(net.aimAngle) });
   net.pending.push({ seq: net.seq, mx, my });
   if (net.pending.length > 120) net.pending.shift();
-  movePlayer(net.pred, mx, my, BRAWLERS[myBrawler()].speed);
-  if (input.mouse.down && !input.touchMode) tryFire({ mouse: true });
+  predictStep(net.pred, mx, my, latestSnap());
+  if (input.mouse.down && !input.touchMode && net.me.alive) tryFire({ mouse: true });
 }
 
 function selfScreenPos() {
@@ -286,7 +335,7 @@ function selfScreenPos() {
 }
 
 function updateAim(mx, my) {
-  const ta = input.touchAim();
+  const ta = input.superAim().active ? input.superAim() : input.touchAim();
   if (ta.active) net.aimAngle = ta.angle;
   else if (!input.touchMode) {
     const s = selfScreenPos();
@@ -294,14 +343,12 @@ function updateAim(mx, my) {
   } else if (Math.hypot(mx, my) > 0.2) net.aimAngle = Math.atan2(my, mx);
 }
 
-function tryFire(intent) {
-  if (app.room?.state !== 'playing' || !net.me.alive || !net.pred) return;
-  if (net.cooldown > 0 || net.me.ammo < 1) return;
-  const b = BRAWLERS[myBrawler()];
+// Turn a fire intent (mouse, drag, or auto-aim tap) into an angle and distance.
+function aimFor(intent, range) {
   const me = { x: net.pred.x, y: net.pred.y };
-  let angle = net.aimAngle, dist = b.range;
+  let angle = net.aimAngle, dist = range;
   if (intent.auto) {
-    let best = null, bd = b.range * 1.1;
+    let best = null, bd = range * 1.1;
     for (const p of net.view?.players ?? []) {
       if (p.isMe) continue;
       const d = Math.hypot(p.x - me.x, p.y - me.y);
@@ -310,17 +357,47 @@ function tryFire(intent) {
     if (best) { angle = Math.atan2(best.y - me.y, best.x - me.x); dist = bd; }
   } else if (intent.angle != null) {
     angle = intent.angle;
-    dist = intent.frac * b.range;
+    dist = intent.frac * range;
   } else if (intent.mouse) {
     const s = selfScreenPos();
-    if (!s) return;
+    if (!s) return null;
     angle = Math.atan2(input.mouse.y - s.y, input.mouse.x - s.x);
     dist = Math.hypot(input.mouse.x - s.x, input.mouse.y - s.y) / renderer.scale;
   }
-  net.aimAngle = angle;
+  return { angle, dist };
+}
+
+function tryFire(intent) {
+  if (!canAct()) return;
+  if (net.me.ghost) {
+    if (net.me.hcd > 0) return;
+    net.me.hcd = HAUNT.cooldown;
+    send({ t: 'h' });
+    return;
+  }
+  if (net.cooldown > 0 || net.me.ammo < 1) return;
+  const aim = aimFor(intent, BRAWLERS[myBrawler()].range);
+  if (!aim) return;
+  net.aimAngle = aim.angle;
   net.cooldown = CLIENT_COOLDOWN;
   net.me.ammo -= 1;
-  send({ t: 'f', x: round2(Math.cos(angle)), y: round2(Math.sin(angle)), d: Math.round(dist) });
+  send({ t: 'f', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist) });
+}
+
+function trySuper(intent) {
+  if (!canAct() || !net.me.alive || net.me.su < 1) return;
+  const aim = aimFor(intent, BRAWLERS[myBrawler()].super.range);
+  if (!aim) return;
+  net.aimAngle = aim.angle;
+  net.me.su = 0;
+  send({ t: 's', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist) });
+}
+
+function sendEmote(n) {
+  if (!canAct() && net.lastState !== 'countdown') return;
+  send({ t: 'e', n });
+  sfx.emote();
+  $('emoteTray').classList.add('hidden');
 }
 
 const lerp = (a, b, k) => a + (b - a) * k;
@@ -340,6 +417,7 @@ function buildView(now) {
   const span = (b.time - a.time) * 1000;
   const k = span > 0 ? Math.min(1, Math.max(0, (rt - a.time * 1000) / span)) : 1;
   const latest = snaps[snaps.length - 1];
+  const selfShown = net.pred ? { x: net.pred.x + net.err.x, y: net.pred.y + net.err.y } : null;
 
   const players = [];
   for (const pb of b.players) {
@@ -348,17 +426,25 @@ function buildView(now) {
     const info = playerById(pb.i);
     players.push({
       id: pb.i, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k), hp: pb.h, maxHp: pb.m, aim: pb.a, cubes: pb.c,
-      bush: pb.bush, brawler: info?.brawler ?? 'brick', name: info?.name ?? '', isMe: false,
+      bush: pb.bush, em: pb.em, dash: pb.d, brawler: info?.brawler ?? 'brick', name: info?.name ?? '', isMe: false,
     });
   }
   const selfSnap = latest.pmap.get(app.myId);
-  if (selfSnap && net.pred) {
-    const x = net.pred.x + net.err.x, y = net.pred.y + net.err.y;
+  if (selfSnap && selfShown && !net.me.ghost) {
     players.push({
-      id: app.myId, x, y, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
-      bush: inBush(x, y) ? 1 : 0, brawler: myBrawler(), name: 'You', isMe: true,
+      id: app.myId, ...selfShown, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
+      bush: inBush(selfShown.x, selfShown.y) ? 1 : 0, em: selfSnap.em, dash: selfSnap.d, brawler: myBrawler(), name: 'You', isMe: true,
     });
   }
+
+  const ghosts = [];
+  for (const gb of b.ghosts) {
+    if (gb.i === app.myId) continue;
+    const ga = a.gmap.get(gb.i) ?? gb;
+    ghosts.push({ id: gb.i, x: lerp(ga.x, gb.x, k), y: lerp(ga.y, gb.y, k), em: gb.em, name: nameOf(gb.i), isMe: false });
+  }
+  const selfGhost = latest.gmap.get(app.myId);
+  if (net.me.ghost && selfGhost && selfShown) ghosts.push({ id: app.myId, ...selfShown, em: selfGhost.em, name: 'You', isMe: true });
 
   const projs = b.projs.map((pb) => {
     const pa = a.prmap.get(pb.i);
@@ -366,22 +452,39 @@ function buildView(now) {
     return pb.k === 'l' ? { ...pb, p: lerp(pa.p, pb.p, k) } : { ...pb, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k) };
   });
 
-  // Fire events (damage numbers, explosions, KOs) when the interpolated time reaches them.
-  while (net.events.length && net.events[0].at <= rt) {
-    const e = net.events.shift();
-    renderer.addEvent(e, now);
-    if (e.k === 'ko') onKnockout(e);
-  }
+  // Fire events (damage numbers, explosions, KOs, sounds) when the interpolated time reaches them.
+  while (net.events.length && net.events[0].at <= rt) handleEvent(net.events.shift(), now);
 
   return {
-    players, projs, cubes: b.cubes, poison: lerp(a.poison, b.poison, k), latest,
-    me: net.me, cam: net.cam,
+    players, ghosts, projs, cubes: b.cubes, crates: b.crates, haunts: b.haunts,
+    poison: lerp(a.poison, b.poison, k), latest, me: net.me, cam: net.cam,
   };
+}
+
+function handleEvent(e, now) {
+  renderer.addEvent(e, now);
+  const vol = e.x != null ? Math.max(0, 1 - Math.hypot(e.x - net.cam.x, e.y - net.cam.y) / 1100) : 1;
+  switch (e.k) {
+    case 'dmg':
+      if (e.id === app.myId) { renderer.hurt(now); renderer.shake(e.src === 'hit' ? 12 : 5); sfx.hurt(); }
+      else if (e.by === app.myId) sfx.hit();
+      break;
+    case 'shot': if (vol > 0) sfx.shot(e.w, vol); break;
+    case 'boom': if (vol > 0) { sfx.boom(e.big, vol); renderer.shake((e.big ? 16 : 8) * vol); } break;
+    case 'ko': sfx.ko(Math.max(vol, 0.3)); onKnockout(e); break;
+    case 'cube': if (e.id === app.myId) sfx.cube(); break;
+    case 'crate': if (vol > 0) sfx.crate(vol); break;
+    case 'crateBreak': if (vol > 0) sfx.crateBreak(vol); break;
+    case 'super': if (vol > 0) { sfx.super(vol); renderer.shake(6 * vol); } break;
+    case 'haunt': if (vol > 0) sfx.haunt(vol); break;
+  }
 }
 
 function onKnockout(e) {
   const feed = document.createElement('div');
-  feed.textContent = e.by ? `${nameOf(e.by)} knocked out ${nameOf(e.id)}` : `${nameOf(e.id)} fell to the poison`;
+  feed.textContent = !e.by ? `${nameOf(e.id)} fell to the poison`
+    : e.haunt ? `👻 ${nameOf(e.by)} haunted out ${nameOf(e.id)}`
+      : `${nameOf(e.by)} knocked out ${nameOf(e.id)}`;
   $('killFeed').append(feed);
   setTimeout(() => feed.remove(), 4000);
   while ($('killFeed').children.length > 4) $('killFeed').firstChild.remove();
@@ -410,9 +513,10 @@ function frame(now) {
   if (!view) return;
 
   const me = view.players.find((p) => p.isMe);
-  let target = me;
+  const meGhost = view.ghosts.find((g) => g.isMe);
+  let target = me ?? meGhost;
   if (!target) target = view.players.find((p) => p.id === net.killedBy) ?? view.players[0];
-  if (me) { net.cam.x = me.x; net.cam.y = me.y; }
+  if (me || meGhost) { net.cam.x = target.x; net.cam.y = target.y; }
   else if (target) {
     const k = Math.min(1, dtf * 6);
     net.cam.x = lerp(net.cam.x, target.x, k);
@@ -420,25 +524,33 @@ function frame(now) {
   }
 
   if (me && app.room?.state === 'playing') {
+    const sa = input.superAim();
     const ta = input.touchAim();
-    const showAim = input.touchMode ? ta.active : true;
+    const stick = sa.active ? sa : ta;
+    const showAim = input.touchMode ? stick.active : true;
     if (showAim) {
-      let dist = BRAWLERS[me.brawler].range;
-      if (input.touchMode) dist *= ta.frac;
+      const b = BRAWLERS[me.brawler];
+      let dist = sa.active ? b.super.range : b.range;
+      if (input.touchMode) dist *= stick.frac;
       else {
         const s = renderer.toScreen(net.cam, me.x, me.y);
         dist = Math.hypot(input.mouse.x - s.x, input.mouse.y - s.y) / renderer.scale;
       }
-      view.aim = { x: me.x, y: me.y, angle: net.aimAngle, dist, brawler: me.brawler };
+      view.aim = { x: me.x, y: me.y, angle: net.aimAngle, dist, brawler: me.brawler, super: sa.active };
     }
   }
-  if (input.touchMode && me) view.sticks = { left: input.left, right: input.right, hint: app.room?.state === 'playing' && view.latest.mt < 8 };
+  if (input.touchMode && (me || meGhost)) {
+    view.sticks = {
+      left: input.left, right: input.right, superStick: input.superStick, ghost: !!meGhost,
+      hint: app.room?.state === 'playing' && (view.latest.mt < 8 || (meGhost && !input.left)),
+    };
+  }
 
   renderer.draw(view, now);
-  updateHud(view, me, target, now);
+  updateHud(view, me, meGhost, target, now);
 }
 
-function updateHud(view, me, target, now) {
+function updateHud(view, me, meGhost, target, now) {
   const snap = view.latest;
   $('aliveCount').textContent = `👥 ${snap.alive} left`;
   const untilPoison = Math.ceil(POISON.start - snap.mt);
@@ -448,12 +560,22 @@ function updateHud(view, me, target, now) {
   poison.textContent = outside ? '☠ Get out of the poison!' : untilPoison > 0 ? `☠ Poison in ${untilPoison}s` : '☠ Poison closing in';
 
   let center = '';
-  if (snap.state === 'countdown') center = String(Math.max(1, Math.ceil(snap.cd)));
-  else if (now - net.fightShownAt < 900) center = 'FIGHT!';
+  if (snap.state === 'countdown') {
+    const n = Math.max(1, Math.ceil(snap.cd));
+    center = String(n);
+    if (net.lastBeep !== n) { net.lastBeep = n; sfx.beep(false); }
+  } else if (now - net.fightShownAt < 900) {
+    center = 'FIGHT!';
+    if (net.lastBeep !== 0) { net.lastBeep = 0; sfx.beep(true); }
+  }
   $('centerMsg').textContent = center;
 
   let spec = '';
-  if (!me && app.room?.state === 'playing') {
+  if (meGhost && app.room?.state === 'playing') {
+    const ready = net.me.hcd <= 0;
+    const how = input.touchMode ? 'Tap right side' : 'Click or Space';
+    spec = `👻 You're a ghost! ${how} to haunt survivors · ${ready ? 'READY' : `${Math.ceil(net.me.hcd)}s`}`;
+  } else if (!me && app.room?.state === 'playing') {
     const inMatch = playerById(app.myId)?.inMatch;
     spec = !inMatch
       ? 'Match in progress. You\'ll join the next round.'
@@ -465,6 +587,10 @@ function updateHud(view, me, target, now) {
     specEl.innerHTML = '';
     if (spec) specEl.append(Object.assign(document.createElement('span'), { textContent: spec }));
   }
+
+  const hint = me && net.me.su >= 1 && !input.touchMode && app.room?.state === 'playing'
+    ? `⚡ ${BRAWLERS[me.brawler].super.name} ready! Press E or right-click` : '';
+  if ($('superHint').textContent !== hint) $('superHint').textContent = hint;
 }
 
 // ---------- UI wiring ----------
@@ -479,6 +605,11 @@ function toast(msg) {
 
 function saveName() {
   local.set('bw_name', myName());
+}
+
+function renderMute() {
+  $('muteBtn').textContent = isMuted() ? '🔇' : '🔊';
+  $('muteBtn').setAttribute('aria-label', isMuted() ? 'Unmute sound' : 'Mute sound');
 }
 
 $('nameInput').value = local.get('bw_name') || '';
@@ -504,7 +635,7 @@ $('leaveBtn').addEventListener('click', () => {
   location.href = location.pathname;
 });
 $('copyBtn').addEventListener('click', async () => {
-  const url = `${location.origin}${location.pathname}?room=${app.code}`;
+  const url = inviteUrl();
   if (navigator.share && input.touchMode) {
     try { await navigator.share({ title: 'Bushwhack', text: `Join my Bushwhack room: ${app.code}`, url }); return; } catch { /* fall through */ }
   }
@@ -515,7 +646,15 @@ $('copyBtn').addEventListener('click', async () => {
     prompt('Copy this link:', url);
   }
 });
+$('muteBtn').addEventListener('click', () => { setMuted(!isMuted()); renderMute(); });
+$('emoteBtn').addEventListener('click', () => $('emoteTray').classList.toggle('hidden'));
+EMOTES.forEach((em, n) => {
+  const b = Object.assign(document.createElement('button'), { textContent: em, title: `Emote (key ${n + 1})` });
+  b.addEventListener('click', () => sendEmote(n));
+  $('emoteTray').append(b);
+});
 
+renderMute();
 buildCards();
 
 // Opened an invite link? Prefill the code. Refreshed mid-game? Rejoin the same seat.

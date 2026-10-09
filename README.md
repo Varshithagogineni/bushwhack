@@ -7,17 +7,22 @@ A real-time multiplayer battle royale for up to 6 players. Friends join from any
 - **Survive.** Last brawler alive wins the round.
 - **Poison closes in** from the edges after 20 seconds. Stay inside the circle.
 - **Bushes hide you** from anyone who isn't right next to you, until you shoot.
-- **Power cubes** (green boxes) give +400 health and +10% damage. Knocked-out brawlers drop theirs.
+- **Break crates** for power cubes: +400 health and +10% damage each. Knocked-out brawlers drop theirs too.
+- **Land hits to charge your Super** (the yellow ring under you), then unleash it.
+- **Ghost Mode:** knocked out? You come back as a ghost, float through walls and drop haunts that slow and hurt the survivors. Nobody sits out the rest of the round.
 - **Ammo** (3 bars under you) refills on its own. Health regenerates after 3 seconds out of combat.
+- **Wins carry over** between rounds in the same room, so friends can play a best-of-5.
 
-| Brawler | Role | Attack |
-|---|---|---|
-| Brick | Tank | Short-range 5-pellet shotgun, 5800 HP |
-| Vex | Sharpshooter | Long-range single shot, 3000 HP |
-| Boom | Thrower | Bomb lobbed over walls with splash damage, 3400 HP |
+| Brawler | Role | Attack | Super |
+|---|---|---|---|
+| Brick | Tank | Short-range 5-pellet shotgun, 5800 HP | **Bulldoze:** charge forward, smashing enemies and crates |
+| Vex | Sharpshooter | Long-range single shot, 3000 HP | **Piercing Volley:** five shots that pass through enemies |
+| Boom | Thrower | Bomb lobbed over walls with splash damage, 3400 HP | **Mega Bomb:** a huge bomb with a massive blast |
 
-**Laptop:** WASD / arrows to move · mouse to aim · click to shoot (hold for auto-fire) · Space to auto-aim
-**Phone:** left thumb drags to move · right thumb drags to aim and releases to shoot · tap the right side to auto-aim
+**Laptop:** WASD / arrows to move · mouse to aim · click to shoot (hold for auto-fire) · Space to auto-aim · E or right-click for Super · 1–4 for emotes
+**Phone:** left thumb drags to move · right thumb drags to aim and releases to shoot · tap the right side to auto-aim · SUPER button when charged · 😀 button for emotes
+
+Friends join by scanning the lobby QR code, opening the invite link, or typing the 4-letter code.
 
 The host can add bots, so two people (or one) can start a match right away.
 
@@ -41,3 +46,4 @@ Phones on the same Wi-Fi can join via `http://<your-computer-ip>:3000`.
 ## Deploy
 
 Any host that runs a long-lived Node process with WebSockets works. `render.yaml` deploys it to Render's free tier.
+`.github/workflows/keep-awake.yml` pings the server every 10 minutes so the free instance never goes to sleep; set the repo variable `GAME_URL` to your Render URL to turn it on.
