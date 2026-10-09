@@ -1,6 +1,11 @@
-// Keyboard + mouse on laptops, twin floating joysticks on touch screens.
+// Keyboard + mouse on laptops, twin floating joysticks (plus a super button) on touch screens.
 export const STICK_R = 60;
-const TAP_MAX = 14; // a right-thumb drag shorter than this counts as a tap (auto-aim)
+const TAP_MAX = 14; // a drag shorter than this counts as a tap (auto-aim)
+
+// Where the touch super button sits (CSS pixels).
+export function superButton() {
+  return { x: innerWidth - 78, y: innerHeight - 200, r: 38 };
+}
 
 export class Input {
   constructor(canvas) {
@@ -9,8 +14,11 @@ export class Input {
     this.mouse = { x: 0, y: 0, down: false };
     this.left = null; // { id, ox, oy, x, y }
     this.right = null;
+    this.superStick = null;
     this.touchMode = matchMedia('(pointer: coarse)').matches;
     this.onFire = () => {};
+    this.onSuper = () => {};
+    this.onEmote = () => {};
 
     addEventListener('keydown', (e) => {
       if (e.target instanceof HTMLInputElement) return;
@@ -19,6 +27,9 @@ export class Input {
         e.preventDefault();
         if (!e.repeat) this.onFire({ auto: true });
       }
+      if ((e.code === 'KeyE' || e.code === 'KeyQ') && !e.repeat) this.onSuper({ mouse: true });
+      const n = ['Digit1', 'Digit2', 'Digit3', 'Digit4'].indexOf(e.code);
+      if (n >= 0 && !e.repeat) this.onEmote(n);
       if (e.code.startsWith('Arrow')) e.preventDefault();
     });
     addEventListener('keyup', (e) => this.keys.delete(e.code));
@@ -34,7 +45,7 @@ export class Input {
   reset() {
     this.keys.clear();
     this.mouse.down = false;
-    this.left = this.right = null;
+    this.left = this.right = this.superStick = null;
   }
 
   down(e) {
@@ -43,13 +54,17 @@ export class Input {
       this.touchMode = false;
       this.mouse.x = e.clientX; this.mouse.y = e.clientY;
       if (e.button === 0) { this.mouse.down = true; this.onFire({ mouse: true }); }
+      if (e.button === 2) this.onSuper({ mouse: true });
       return;
     }
     this.touchMode = true;
     this.canvas.setPointerCapture?.(e.pointerId);
     const stick = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY };
+    const sb = superButton();
     if (e.clientX < innerWidth / 2) { if (!this.left) this.left = stick; }
-    else if (!this.right) this.right = stick;
+    else if (!this.superStick && Math.hypot(e.clientX - sb.x, e.clientY - sb.y) < sb.r * 1.35) {
+      this.superStick = { ...stick, ox: sb.x, oy: sb.y };
+    } else if (!this.right) this.right = stick;
   }
 
   move_(e) {
@@ -57,10 +72,10 @@ export class Input {
       this.mouse.x = e.clientX; this.mouse.y = e.clientY;
       return;
     }
-    for (const s of [this.left, this.right]) {
+    for (const s of [this.left, this.right, this.superStick]) {
       if (!s || s.id !== e.pointerId) continue;
       s.x = e.clientX; s.y = e.clientY;
-      // Floating stick: drag the base along when the thumb goes past the edge.
+      // Floating move stick: drag the base along when the thumb goes past the edge.
       const dx = s.x - s.ox, dy = s.y - s.oy, d = Math.hypot(dx, dy);
       if (s === this.left && d > STICK_R) {
         s.ox = s.x - (dx / d) * STICK_R;
@@ -76,9 +91,14 @@ export class Input {
     }
     if (this.left?.id === e.pointerId) this.left = null;
     if (this.right?.id === e.pointerId) {
-      const aim = this.touchAim();
+      const aim = this.stickAim(this.right);
       this.right = null;
       if (!cancelled) this.onFire(aim.active ? { angle: aim.angle, frac: aim.frac } : { auto: true });
+    }
+    if (this.superStick?.id === e.pointerId) {
+      const aim = this.stickAim(this.superStick);
+      this.superStick = null;
+      if (!cancelled) this.onSuper(aim.active ? { angle: aim.angle, frac: aim.frac } : { auto: true });
     }
   }
 
@@ -98,12 +118,15 @@ export class Input {
     return { mx, my };
   }
 
-  // Right-thumb aim: active once dragged past the tap threshold.
-  touchAim() {
-    if (!this.right) return { active: false };
-    const dx = this.right.x - this.right.ox, dy = this.right.y - this.right.oy;
+  // A stick aims once dragged past the tap threshold.
+  stickAim(s) {
+    if (!s) return { active: false };
+    const dx = s.x - s.ox, dy = s.y - s.oy;
     const d = Math.hypot(dx, dy);
     if (d < TAP_MAX) return { active: false };
     return { active: true, angle: Math.atan2(dy, dx), frac: Math.min(1, d / (STICK_R * 1.4)) };
   }
+
+  touchAim() { return this.stickAim(this.right); }
+  superAim() { return this.stickAim(this.superStick); }
 }

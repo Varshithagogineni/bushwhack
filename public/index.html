@@ -37,12 +37,14 @@
         <li><b>Survive.</b> Last brawler alive wins the round.</li>
         <li><b>Poison closes in</b> from the edges after 20 seconds. Stay inside the circle.</li>
         <li><b>Bushes hide you</b> from anyone who isn't right next to you, until you shoot.</li>
-        <li><b>Power cubes</b> (green boxes) give +health and +damage. Knocked-out brawlers drop theirs.</li>
+        <li><b>Break crates</b> for power cubes: +health and +damage. Knocked-out brawlers drop theirs too.</li>
+        <li><b>Land hits to charge your Super</b> (yellow ring under you), then unleash it.</li>
+        <li><b>Knocked out? You're not done.</b> Come back as a 👻 ghost, float through walls and drop haunts that slow and hurt the survivors.</li>
         <li><b>Ammo</b> (3 bars under you) refills on its own. Health heals when you stop fighting.</li>
       </ul>
       <div class="controls">
-        <div><h3>Laptop</h3><p><kbd>WASD</kbd> move · <b>mouse</b> aim · <b>click</b> shoot · <kbd>Space</kbd> auto-aim</p></div>
-        <div><h3>Phone</h3><p><b>Left thumb</b> move · <b>right thumb</b> drag to aim, release to shoot · <b>tap</b> to auto-aim</p></div>
+        <div><h3>Laptop</h3><p><kbd>WASD</kbd> move · <b>mouse</b> aim · <b>click</b> shoot · <kbd>Space</kbd> auto-aim · <kbd>E</kbd> / <b>right-click</b> Super · <kbd>1</kbd>–<kbd>4</kbd> emotes</p></div>
+        <div><h3>Phone</h3><p><b>Left thumb</b> move · <b>right thumb</b> drag to aim, release to shoot · <b>tap</b> to auto-aim · <b>SUPER</b> button when charged</p></div>
       </div>
     </section>
   </main>
@@ -55,7 +57,10 @@
         <strong id="roomCode">----</strong>
         <button id="copyBtn" class="btn small">Copy invite link</button>
       </div>
-      <p class="hint">Friends open this site and enter the code, or just open your invite link.</p>
+      <div class="invite">
+        <div id="qr" class="qr hidden" aria-label="QR code for the invite link"></div>
+        <p class="hint">Friends scan the QR code, open your invite link, or enter the code on this site. No login needed.</p>
+      </div>
     </div>
 
     <div class="panel">
@@ -87,7 +92,13 @@
       </div>
       <div id="killFeed"></div>
       <div id="centerMsg"></div>
+      <div id="superHint"></div>
       <div id="spectateMsg"></div>
+      <div id="hudButtons">
+        <button id="muteBtn" class="hud-btn" aria-label="Mute sound">🔊</button>
+        <button id="emoteBtn" class="hud-btn" aria-label="Emotes">😀</button>
+        <div id="emoteTray" class="hidden"></div>
+      </div>
     </div>
     <div id="results" class="hidden">
       <div class="results-card">
@@ -103,6 +114,7 @@
   <div id="net" class="hidden">Reconnecting…</div>
   <div id="toast" class="hidden"></div>
 
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
   <script type="module" src="/main.js"></script>
 </body>
 </html>
