@@ -1,13 +1,15 @@
 import {
   TICK_RATE, DT, WORLD, CENTER, PLAYER_RADIUS, MAX_PLAYERS, MIN_PLAYERS, MAX_AMMO, SHOT_COOLDOWN,
   REGEN_DELAY, REGEN_RATE, REVEAL_TIME, BUSH_SEE_DIST, CUBE_HP, CUBE_DMG, CUBE_PICKUP, CRATE_R, CRATE_HP,
-  COUNTDOWN, POISON, HAUNT, EMOTES, BRAWLERS, BRAWLER_IDS, clamp, isWallAt, inBush, resolveWalls, resolveCircles,
-  movePlayer, moveGhost, speedFactor, hasLineOfSight, poisonRadius, nearestFloor, spawnPoints, crateSpots, round2,
+  COUNTDOWN, POISON, HAUNT, EMOTES, BRAWLERS, BRAWLER_IDS, MODES, RESPAWN_TIME, GEM, clamp, isWallAt, inBush,
+  resolveWalls, resolveCircles, movePlayer, moveGhost, speedFactor, hasLineOfSight, poisonRadius, nearestFloor,
+  spawnPoints, teamSpawn, teamBase, crateSpots, round2,
 } from '../shared/game.js';
 
 const RECONNECT_GRACE_MS = 30_000;
 const RESULTS_MS = 15_000;
 const MAX_QUEUED_INPUTS = 8;
+const MAX_GEMS_ON_MAP = 20;
 const BOT_NAMES = ['Rex', 'Pip', 'Juno', 'Mako', 'Tilly', 'Ozzy', 'Nova', 'Bolt'];
 
 export class Room {
@@ -17,6 +19,7 @@ export class Room {
     this.players = new Map();
     this.nextId = 1;
     this.hostId = null;
+    this.mode = 'showdown';
     this.state = 'lobby'; // lobby | countdown | playing | ended
     this.time = 0; // sim seconds since match start (incl. countdown)
     this.matchTime = 0; // seconds since the fight began
@@ -24,16 +27,23 @@ export class Room {
     this.cubes = [];
     this.crates = [];
     this.haunts = [];
+    this.gems = [];
+    this.gemCountdown = null; // { team, endsAt }
+    this.nextGemAt = 0;
     this.events = [];
     this.nextObjId = 1;
     this.results = null;
+    this.winnerTeam = null;
     this.loop = null;
     this.resultsTimer = null;
   }
 
-  // ---------- membership ----------
-
+  get rules() { return MODES[this.mode]; }
   get humans() { return [...this.players.values()].filter((p) => !p.bot); }
+  sameTeam(a, b) { return this.rules.teams && a && b && a !== b && a.team === b.team; }
+  teamCount(t) { return [...this.players.values()].filter((p) => p.team === t).length; }
+
+  // ---------- membership ----------
 
   addHuman(ws, name, token) {
     const existing = this.humans.find((p) => p.token === token);
@@ -60,14 +70,27 @@ export class Room {
   makePlayer(name, bot) {
     const p = {
       id: this.nextId++, name, bot, brawler: BRAWLER_IDS[Math.floor(Math.random() * BRAWLER_IDS.length)],
+      team: this.teamCount(0) <= this.teamCount(1) ? 0 : 1,
       ws: null, connected: bot, token: null, dropTimer: null, wins: 0,
       inMatch: false, alive: false, ghost: false, x: 0, y: 0, hp: 0, maxHp: 0, ammo: MAX_AMMO, cooldown: 0,
       superCharge: 0, dash: null, hauntCd: 0, hauntAcc: 0, emote: -1, emoteUntil: 0, emoteCd: 0,
       cubes: 0, kills: 0, rank: 0, aim: 0, inputs: [], ack: 0, lastHurt: -99, lastAttack: -99,
-      revealUntil: -99, poisonAcc: 0, ai: null,
+      revealUntil: -99, poisonAcc: 0, ai: null, gems: 0, stars: 2, score: 0, respawnAt: 0,
     };
     this.players.set(p.id, p);
     return p;
+  }
+
+  // Keep teams within one player of each other, moving bots before people.
+  balanceTeams() {
+    const all = [...this.players.values()];
+    for (;;) {
+      const a = all.filter((p) => p.team === 0), b = all.filter((p) => p.team === 1);
+      const [big, team] = a.length > b.length + 1 ? [a, 1] : b.length > a.length + 1 ? [b, 0] : [null];
+      if (!big) return;
+      const mover = [...big].reverse().find((p) => p.bot) ?? big[big.length - 1];
+      mover.team = team;
+    }
   }
 
   disconnect(p) {
@@ -109,6 +132,19 @@ export class Room {
     switch (m.t) {
       case 'pick':
         if (this.state === 'lobby' && BRAWLERS[m.brawler]) { p.brawler = m.brawler; this.broadcastRoom(); }
+        break;
+      case 'mode':
+        if (isHost && this.state === 'lobby' && MODES[m.mode]) {
+          this.mode = m.mode;
+          if (this.rules.teams) this.balanceTeams();
+          this.broadcastRoom();
+        }
+        break;
+      case 'team':
+        if (this.state === 'lobby' && this.rules.teams && (m.team === 0 || m.team === 1) && this.teamCount(m.team) < MAX_PLAYERS / 2) {
+          p.team = m.team;
+          this.broadcastRoom();
+        }
         break;
       case 'addBot':
         if (isHost && this.state === 'lobby' && this.players.size < MAX_PLAYERS) {
@@ -169,16 +205,20 @@ export class Room {
 
   startMatch() {
     clearTimeout(this.resultsTimer);
-    const roster = [...this.players.values()];
-    const spawns = spawnPoints(roster.length);
-    this.crates = crateSpots().map((s) => ({ id: this.nextObjId++, x: s.x, y: s.y, hp: CRATE_HP }));
-    roster.sort(() => Math.random() - 0.5).forEach((p, i) => {
+    if (this.rules.teams) this.balanceTeams();
+    const roster = [...this.players.values()].sort(() => Math.random() - 0.5);
+    const ring = spawnPoints(roster.length);
+    const teamIndex = [0, 0];
+    this.crates = this.mode === 'showdown' ? crateSpots().map((s) => ({ id: this.nextObjId++, x: s.x, y: s.y, hp: CRATE_HP })) : [];
+    roster.forEach((p, i) => {
       const b = BRAWLERS[p.brawler];
+      const spot = this.rules.teams ? teamSpawn(p.team, teamIndex[p.team]++) : ring[i];
       Object.assign(p, {
-        inMatch: true, alive: true, ghost: false, x: spawns[i].x, y: spawns[i].y, hp: b.hp, maxHp: b.hp,
+        inMatch: true, alive: true, ghost: false, x: spot.x, y: spot.y, hp: b.hp, maxHp: b.hp,
         ammo: MAX_AMMO, cooldown: 0, superCharge: 0, dash: null, hauntCd: 0, hauntAcc: 0, emote: -1, emoteUntil: 0,
         cubes: 0, kills: 0, rank: 0, inputs: [], ack: 0, lastHurt: -99, lastAttack: -99, revealUntil: -99, poisonAcc: 0,
-        aim: Math.atan2(CENTER - spawns[i].y, CENTER - spawns[i].x),
+        gems: 0, stars: 2, score: 0, respawnAt: 0,
+        aim: Math.atan2(CENTER - spot.y, CENTER - spot.x),
         ai: p.bot ? { strafe: 1, strafeT: 0, target: null, reactAt: 0, wp: null, wpT: 0, unstuckT: 0, ux: 0, uy: 0, lx: 0, ly: 0 } : null,
       });
       resolveCircles(p, PLAYER_RADIUS, this.crates);
@@ -186,25 +226,38 @@ export class Room {
     this.projs = [];
     this.cubes = [];
     this.haunts = [];
+    this.gems = [];
+    this.gemCountdown = null;
+    this.nextGemAt = 4;
     this.events = [];
     this.time = 0;
     this.matchTime = 0;
     this.results = null;
+    this.winnerTeam = null;
     this.state = 'countdown';
     this.broadcastRoom();
     this.stopLoop();
     this.loop = setInterval(() => this.tick(), 1000 / TICK_RATE);
   }
 
-  endMatch() {
-    const alive = [...this.players.values()].filter((p) => p.inMatch && p.alive);
-    for (const p of alive) p.rank = 1;
-    if (alive.length === 1) alive[0].wins++;
+  // winners: list of players who won (may be empty for a draw).
+  endMatch(winners, winnerTeam = null) {
+    const all = [...this.players.values()].filter((p) => p.inMatch);
+    for (const p of winners) { p.rank = 1; p.wins++; }
+    this.winnerTeam = winnerTeam;
+    if (this.mode !== 'showdown') {
+      // Respawn modes rank by score, winners first.
+      const key = (p) => (this.mode === 'bounty' ? p.score : p.kills * 10 + p.gems);
+      all.sort((a, b) => (winners.includes(b) - winners.includes(a)) || key(b) - key(a));
+      all.forEach((p, i) => { p.rank = i + 1; });
+    }
     this.state = 'ended';
-    this.results = [...this.players.values()]
-      .filter((p) => p.inMatch)
+    this.results = all
       .sort((a, b) => a.rank - b.rank)
-      .map((p) => ({ id: p.id, name: p.name, brawler: p.brawler, rank: p.rank, kills: p.kills, bot: p.bot, wins: p.wins }));
+      .map((p) => ({
+        id: p.id, name: p.name, brawler: p.brawler, rank: p.rank, kills: p.kills, bot: p.bot, wins: p.wins,
+        team: p.team, score: p.score, won: winners.includes(p),
+      }));
     this.sendSnapshots();
     this.stopLoop();
     this.broadcastRoom();
@@ -220,12 +273,19 @@ export class Room {
     this.cubes = [];
     this.crates = [];
     this.haunts = [];
+    this.gems = [];
     this.broadcastRoom();
   }
 
   stopLoop() {
     clearInterval(this.loop);
     this.loop = null;
+  }
+
+  teamGems() {
+    const t = [0, 0];
+    for (const p of this.players.values()) if (p.inMatch && p.alive) t[p.team] += p.gems;
+    return t;
   }
 
   // ---------- simulation ----------
@@ -239,8 +299,15 @@ export class Room {
     }
     if (this.state !== 'playing') return;
     this.matchTime += DT;
-    const safeR = poisonRadius(this.matchTime);
+    const showdown = this.mode === 'showdown';
+    const safeR = showdown ? poisonRadius(this.matchTime) : Infinity;
     this.haunts = this.haunts.filter((h) => h.until > this.time);
+
+    if (this.rules.respawn) {
+      for (const p of this.players.values()) {
+        if (p.inMatch && !p.alive && p.respawnAt && this.time >= p.respawnAt) this.respawn(p);
+      }
+    }
     const fighters = [...this.players.values()].filter((p) => p.alive);
 
     for (const p of this.players.values()) {
@@ -279,10 +346,10 @@ export class Room {
       }
     }
 
-    // Poison and haunts
+    // Poison (Showdown) and haunts
     for (const p of fighters) {
       if (!p.alive) continue;
-      if (Math.hypot(p.x - CENTER, p.y - CENTER) > safeR) {
+      if (showdown && Math.hypot(p.x - CENTER, p.y - CENTER) > safeR) {
         p.poisonAcc += POISON.dps * DT;
         if (p.poisonAcc >= POISON.dps / 2) { const a = p.poisonAcc; p.poisonAcc = 0; this.damage(p, a, null); }
       } else p.poisonAcc = 0;
@@ -300,7 +367,7 @@ export class Room {
 
     this.updateProjectiles();
 
-    // Power cubes
+    // Power cubes (Showdown)
     for (const p of fighters) {
       if (!p.alive) continue;
       this.cubes = this.cubes.filter((c) => {
@@ -313,9 +380,82 @@ export class Room {
       });
     }
 
+    if (this.mode === 'gemgrab') this.updateGems(fighters);
+
     this.sendSnapshots();
-    const left = [...this.players.values()].filter((p) => p.alive).length;
-    if (left <= 1) this.endMatch();
+    this.checkEnd();
+  }
+
+  updateGems(fighters) {
+    if (this.matchTime >= this.nextGemAt) {
+      this.nextGemAt = this.matchTime + GEM.every;
+      if (this.gems.length < MAX_GEMS_ON_MAP) {
+        const a = Math.random() * Math.PI * 2;
+        this.gems.push({ id: this.nextObjId++, x: CENTER + Math.cos(a) * 40, y: CENTER + Math.sin(a) * 40, born: this.time });
+        this.events.push({ k: 'gemspawn', x: CENTER, y: CENTER });
+      }
+    }
+    for (const p of fighters) {
+      if (!p.alive) continue;
+      this.gems = this.gems.filter((g) => {
+        if (this.time - g.born < 0.6 || Math.hypot(g.x - p.x, g.y - p.y) > GEM.pickup) return true;
+        p.gems++;
+        this.events.push({ k: 'gem', id: p.id, x: Math.round(g.x), y: Math.round(g.y) });
+        return false;
+      });
+    }
+    // A team holding 10+ gems, and more than the other team, starts the 15 s countdown.
+    const [a, b] = this.teamGems();
+    const leader = a >= GEM.toWin && a > b ? 0 : b >= GEM.toWin && b > a ? 1 : null;
+    if (leader === null) this.gemCountdown = null;
+    else if (!this.gemCountdown || this.gemCountdown.team !== leader) this.gemCountdown = { team: leader, endsAt: this.time + GEM.countdown };
+  }
+
+  checkEnd() {
+    if (this.state !== 'playing') return;
+    const inMatch = [...this.players.values()].filter((p) => p.inMatch);
+    if (this.mode === 'showdown') {
+      const alive = inMatch.filter((p) => p.alive);
+      if (alive.length <= 1) this.endMatch(alive);
+      return;
+    }
+    if (this.mode === 'gemgrab') {
+      if (this.gemCountdown && this.time >= this.gemCountdown.endsAt) {
+        const t = this.gemCountdown.team;
+        return this.endMatch(inMatch.filter((p) => p.team === t), t);
+      }
+      if (this.matchTime >= this.rules.duration) {
+        const [a, b] = this.teamGems();
+        const t = a > b ? 0 : b > a ? 1 : null;
+        return this.endMatch(t === null ? [] : inMatch.filter((p) => p.team === t), t);
+      }
+      // Everyone on one team left the room: the other team wins.
+      for (const t of [0, 1]) if (!inMatch.some((p) => p.team === t)) return this.endMatch(inMatch, 1 - t);
+      return;
+    }
+    if (this.mode === 'bounty' && this.matchTime >= this.rules.duration) {
+      const best = Math.max(...inMatch.map((p) => p.score));
+      this.endMatch(best > 0 ? inMatch.filter((p) => p.score === best) : []);
+    }
+  }
+
+  respawn(p) {
+    const b = BRAWLERS[p.brawler];
+    let spot;
+    if (this.rules.teams) spot = teamSpawn(p.team, Math.floor(Math.random() * 3));
+    else {
+      // Pick the spawn point furthest from everyone still fighting.
+      const others = [...this.players.values()].filter((o) => o.alive && o !== p);
+      spot = spawnPoints(8).reduce((best, s) => {
+        const d = Math.min(...others.map((o) => Math.hypot(o.x - s.x, o.y - s.y)), 1e9);
+        return d > best.d ? { ...s, d } : best;
+      }, { d: -1 }) ;
+    }
+    Object.assign(p, {
+      alive: true, x: spot.x, y: spot.y, hp: b.hp, maxHp: b.hp, ammo: MAX_AMMO, cooldown: 0, dash: null,
+      inputs: [], respawnAt: 0, lastHurt: -99, revealUntil: this.time + 1.5,
+    });
+    this.events.push({ k: 'spawn', id: p.id, x: Math.round(p.x), y: Math.round(p.y) });
   }
 
   attackStart(p, ax, ay) {
@@ -397,7 +537,7 @@ export class Room {
       }
       resolveCircles(p, PLAYER_RADIUS, this.crates);
       for (const o of this.players.values()) {
-        if (!o.alive || o === p || d.hit.has(o.id)) continue;
+        if (!o.alive || o === p || d.hit.has(o.id) || this.sameTeam(p, o)) continue;
         const dx = o.x - p.x, dy = o.y - p.y, dist = Math.hypot(dx, dy);
         if (dist < PLAYER_RADIUS * 2 + 6) {
           d.hit.add(o.id);
@@ -434,7 +574,7 @@ export class Room {
         if (pr.t < pr.flight) { keep.push(pr); continue; }
         this.events.push({ k: 'boom', x: Math.round(pr.tx), y: Math.round(pr.ty), r: pr.blast, big: pr.big ? 1 : 0 });
         for (const p of this.players.values()) {
-          if (p.alive && p.id !== pr.owner && Math.hypot(p.x - pr.tx, p.y - pr.ty) <= pr.blast + PLAYER_RADIUS) {
+          if (p.alive && p.id !== pr.owner && !this.sameTeam(owner, p) && Math.hypot(p.x - pr.tx, p.y - pr.ty) <= pr.blast + PLAYER_RADIUS) {
             this.damage(p, pr.dmg, owner);
           }
         }
@@ -459,7 +599,7 @@ export class Room {
         const crate = this.crates.find((c) => Math.hypot(c.x - pr.x, c.y - pr.y) < CRATE_R + 6);
         if (crate) { this.hitCrate(crate, pr.dmg); dead = true; break; }
         for (const p of this.players.values()) {
-          if (!p.alive || p.id === pr.owner || pr.hit?.has(p.id)) continue;
+          if (!p.alive || p.id === pr.owner || pr.hit?.has(p.id) || this.sameTeam(owner, p)) continue;
           if (Math.hypot(p.x - pr.x, p.y - pr.y) <= PLAYER_RADIUS + 8) {
             this.damage(p, pr.dmg, owner);
             if (pr.hit) pr.hit.add(p.id); // piercing shots keep going
@@ -473,7 +613,7 @@ export class Room {
   }
 
   damage(p, amount, attacker, haunted = false) {
-    if (!p.alive) return;
+    if (!p.alive || this.sameTeam(attacker, p)) return;
     p.hp -= amount;
     p.lastHurt = this.time;
     if (attacker) p.revealUntil = Math.max(p.revealUntil, this.time + REVEAL_TIME);
@@ -487,25 +627,45 @@ export class Room {
     if (p.hp <= 0) this.eliminate(p, attacker, haunted);
   }
 
+  scatter(x, y, count, make) {
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2;
+      const spot = { x: x + Math.cos(a) * (count > 1 ? 36 : 0), y: y + Math.sin(a) * (count > 1 ? 36 : 0) };
+      resolveWalls(spot, 16);
+      make(spot);
+    }
+  }
+
   eliminate(p, attacker, haunted = false) {
     if (!p.alive) return;
     p.alive = false;
     p.hp = 0;
     p.dash = null;
     p.inputs.length = 0;
-    p.rank = [...this.players.values()].filter((x) => x.alive).length + 1;
     if (attacker && attacker !== p) attacker.kills++;
-    // Humans come back as ghosts so nobody sits out the rest of the round.
-    if (!p.bot && this.state !== 'countdown') { p.ghost = true; p.hauntCd = 2; }
-    // Drop power cubes: everything they carried plus one.
-    const drops = p.cubes + 1;
-    for (let i = 0; i < drops; i++) {
-      const a = (i / drops) * Math.PI * 2;
-      const spot = { x: p.x + Math.cos(a) * (drops > 1 ? 34 : 0), y: p.y + Math.sin(a) * (drops > 1 ? 34 : 0) };
-      resolveWalls(spot, 16);
-      this.cubes.push({ id: this.nextObjId++, x: spot.x, y: spot.y });
+    let bounty = 0;
+    if (this.mode === 'showdown') {
+      p.rank = [...this.players.values()].filter((x) => x.alive).length + 1;
+      // Humans come back as ghosts so nobody sits out the rest of the round.
+      if (!p.bot && this.state !== 'countdown') { p.ghost = true; p.hauntCd = 2; }
+      // Drop power cubes: everything they carried plus one.
+      this.scatter(p.x, p.y, p.cubes + 1, (s) => this.cubes.push({ id: this.nextObjId++, x: s.x, y: s.y }));
+    } else {
+      p.respawnAt = this.time + RESPAWN_TIME;
+      if (this.mode === 'bounty') {
+        bounty = p.stars;
+        if (attacker && attacker !== p) {
+          attacker.score += p.stars;
+          attacker.stars = Math.min(7, attacker.stars + 1);
+        }
+        p.stars = 2;
+      }
+      if (this.mode === 'gemgrab' && p.gems) {
+        this.scatter(p.x, p.y, p.gems, (s) => this.gems.push({ id: this.nextObjId++, x: s.x, y: s.y, born: this.time }));
+        p.gems = 0;
+      }
     }
-    this.events.push({ k: 'ko', id: p.id, by: attacker ? attacker.id : 0, haunt: haunted ? 1 : 0, x: Math.round(p.x), y: Math.round(p.y) });
+    this.events.push({ k: 'ko', id: p.id, by: attacker ? attacker.id : 0, haunt: haunted ? 1 : 0, bounty, x: Math.round(p.x), y: Math.round(p.y) });
   }
 
   haunt(p) {
@@ -516,7 +676,7 @@ export class Room {
   }
 
   canSee(viewer, p) {
-    if (viewer.id === p.id || !viewer.alive) return true;
+    if (viewer.id === p.id || !viewer.alive || this.sameTeam(viewer, p)) return true;
     if (!inBush(p.x, p.y) || this.time < p.revealUntil) return true;
     return Math.hypot(viewer.x - p.x, viewer.y - p.y) < BUSH_SEE_DIST;
   }
@@ -537,12 +697,23 @@ export class Room {
 
     let target = null, td = Infinity;
     for (const o of fighters) {
-      if (o === p || !o.alive || !this.canSee(p, o)) continue;
+      if (o === p || !o.alive || this.sameTeam(p, o) || !this.canSee(p, o)) continue;
       const d = Math.hypot(o.x - p.x, o.y - p.y);
       if (d < td && d < 720) { td = d; target = o; }
     }
-    // Early on, bots loot crates and only fight what gets in their face.
-    if (target && this.matchTime < 15 && td > 300) { target = null; td = Infinity; }
+    // Early in Showdown, bots loot crates and only fight what gets in their face.
+    if (target && this.mode === 'showdown' && this.matchTime < 25 && td > 300) { target = null; td = Infinity; }
+    // Gem Grab: grab nearby gems first; carry them home when hurt.
+    let goal = null;
+    if (this.mode === 'gemgrab') {
+      const gem = this.gems.reduce((best, g) => {
+        const d = Math.hypot(g.x - p.x, g.y - p.y);
+        return d < (best?.d ?? Infinity) ? { ...g, d } : best;
+      }, null);
+      if (p.gems >= 3 && p.hp < p.maxHp * 0.6) goal = teamBase(p.team);
+      else if (gem && (!target || gem.d < td * 0.8)) goal = gem;
+      if (goal && target && td > 260) target = null;
+    }
     if (target !== ai.target) { ai.target = target; ai.reactAt = this.time + 0.45 + Math.random() * 0.3; }
 
     const dc = Math.hypot(p.x - CENTER, p.y - CENTER);
@@ -566,6 +737,9 @@ export class Room {
           this.fire(p, Math.cos(a), Math.sin(a), d);
         }
       }
+    } else if (goal) {
+      const dx = goal.x - p.x, dy = goal.y - p.y, d = Math.max(1, Math.hypot(dx, dy));
+      if (d > 20) { mx = dx / d; my = dy / d; }
     } else {
       // Nobody around: go break the nearest crate, otherwise wander.
       let crate = null, cd = 900;
@@ -573,14 +747,13 @@ export class Room {
         const d = Math.hypot(c.x - p.x, c.y - p.y);
         if (d < cd && Math.hypot(c.x - CENTER, c.y - CENTER) < safeR - 100) { cd = d; crate = c; }
       }
-      const goal = crate ?? ai.wp;
       ai.wpT -= DT;
       if (!crate && (!ai.wp || ai.wpT <= 0 || Math.hypot(ai.wp.x - p.x, ai.wp.y - p.y) < 40)) {
-        const a = Math.random() * Math.PI * 2, r = Math.random() * Math.min(safeR * 0.6, 600);
+        const a = Math.random() * Math.PI * 2, r = Math.random() * Math.min(safeR * 0.6, WORLD * 0.3);
         ai.wp = nearestFloor(CENTER + Math.cos(a) * r, CENTER + Math.sin(a) * r);
         ai.wpT = 4;
       }
-      const g = goal ?? ai.wp;
+      const g = crate ?? ai.wp;
       const dx = g.x - p.x, dy = g.y - p.y, d = Math.max(1, Math.hypot(dx, dy));
       if (crate && d < Math.min(b.range * 0.8, 300)) {
         if (p.ammo >= 1.5 && Math.random() < 0.06 && (b.attack === 'lob' || hasLineOfSight(p.x, p.y, crate.x, crate.y))) {
@@ -606,11 +779,13 @@ export class Room {
       t: 'room',
       code: this.code,
       state: this.state,
+      mode: this.mode,
       hostId: this.hostId,
       players: [...this.players.values()].map((p) => ({
-        id: p.id, name: p.name, brawler: p.brawler, bot: p.bot, connected: p.connected, inMatch: p.inMatch, wins: p.wins,
+        id: p.id, name: p.name, brawler: p.brawler, bot: p.bot, connected: p.connected, inMatch: p.inMatch, wins: p.wins, team: p.team,
       })),
       results: this.results,
+      winnerTeam: this.winnerTeam,
     };
   }
 
@@ -627,24 +802,30 @@ export class Room {
       ? { i: pr.id, k: 'l', sx: Math.round(pr.sx), sy: Math.round(pr.sy), tx: Math.round(pr.tx), ty: Math.round(pr.ty), p: round2(pr.t / pr.flight), r: pr.blast, big: pr.big ? 1 : 0 }
       : { i: pr.id, k: pr.kind === 'pellet' ? 'p' : pr.kind === 'volley' ? 'v' : 'b', x: Math.round(pr.x), y: Math.round(pr.y) });
     const base = {
-      t: 'snap', time: round2(this.time), state: this.state, cd: Math.max(0, COUNTDOWN - this.time),
-      poison: Math.round(poisonRadius(this.matchTime)), mt: Math.round(this.matchTime), alive: fighters.length,
+      t: 'snap', time: round2(this.time), state: this.state, mode: this.mode, cd: Math.max(0, COUNTDOWN - this.time),
+      poison: Math.round(this.mode === 'showdown' ? poisonRadius(this.matchTime) : 99999), mt: Math.round(this.matchTime), alive: fighters.length,
+      left: this.rules.duration ? Math.max(0, Math.ceil(this.rules.duration - this.matchTime)) : null,
       projs,
       cubes: this.cubes.map((c) => ({ i: c.id, x: Math.round(c.x), y: Math.round(c.y) })),
       crates: this.crates.map((c) => ({ i: c.id, x: c.x, y: c.y, h: round2(Math.max(0, c.hp) / CRATE_HP) })),
       haunts: this.haunts.map((h) => ({ i: h.id, x: Math.round(h.x), y: Math.round(h.y), r: h.r, l: round2(h.until - this.time) })),
       ghosts: all.filter((p) => p.ghost).map((p) => ({ i: p.id, x: Math.round(p.x), y: Math.round(p.y), em: emoteOf(p) })),
+      gems: this.gems.map((g) => ({ i: g.id, x: Math.round(g.x), y: Math.round(g.y) })),
+      tg: this.mode === 'gemgrab' ? this.teamGems() : null,
+      gcd: this.gemCountdown ? { team: this.gemCountdown.team, left: Math.max(0, Math.ceil(this.gemCountdown.endsAt - this.time)) } : null,
+      scores: this.mode === 'bounty' ? all.filter((p) => p.inMatch).map((p) => [p.id, p.score]) : null,
       ev: this.events,
     };
     for (const viewer of this.humans) {
       if (!viewer.connected || !viewer.ws || viewer.ws.bufferedAmount > 256 * 1024) continue;
       const players = fighters.filter((p) => this.canSee(viewer, p)).map((p) => ({
         i: p.id, x: Math.round(p.x), y: Math.round(p.y), h: Math.round(p.hp), m: p.maxHp, a: round2(p.aim),
-        c: p.cubes, bush: inBush(p.x, p.y) ? 1 : 0, em: emoteOf(p), d: p.dash ? 1 : 0,
+        c: p.cubes, bush: inBush(p.x, p.y) ? 1 : 0, em: emoteOf(p), d: p.dash ? 1 : 0, t: p.team, g: p.gems, st: p.stars,
       }));
       const me = {
         alive: viewer.alive, ghost: viewer.ghost, ack: viewer.ack, ammo: round2(viewer.ammo), cubes: viewer.cubes,
-        su: round2(viewer.superCharge), hcd: round2(viewer.hauntCd),
+        su: round2(viewer.superCharge), hcd: round2(viewer.hauntCd), team: viewer.team, score: viewer.score,
+        respawn: viewer.respawnAt ? Math.max(0, Math.ceil(viewer.respawnAt - this.time)) : 0,
       };
       send(viewer.ws, JSON.stringify({ ...base, players, me }));
     }

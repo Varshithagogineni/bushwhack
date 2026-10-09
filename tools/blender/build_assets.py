@@ -516,24 +516,19 @@ def boulder(name, loc, size, seed, m, parent, moss=False):
 
 
 def build_wall(v, stretch=True):
-    """Natural cover: boulder clusters and driftwood instead of stone blocks."""
+    """Brawl Stars-style cover: a stone block with a mossy top, in three stone tints."""
     root = empty('wall')
-    rock = noise_mat('rock', '#8d897f', '#c2bcae', 6, kind='rock')
-    if v == 0:
-        boulder('b0', (-0.12, 0.08, 0.3), (0.45, 0.42, 0.42), 1.0, rock, root, moss=True)
-        boulder('b1', (0.26, -0.18, 0.2), (0.3, 0.3, 0.28), 2.0, rock, root)
-        boulder('b2', (0.12, 0.33, 0.16), (0.26, 0.22, 0.22), 3.0, rock, root)
-    elif v == 1:
-        boulder('b0', (0.0, 0.0, 0.33), (0.52, 0.5, 0.44), 4.0, rock, root, moss=True)
-        boulder('b1', (-0.36, -0.3, 0.1), (0.16, 0.15, 0.13), 5.0, rock, root)
-    else:
-        boulder('b0', (0.18, 0.15, 0.27), (0.38, 0.38, 0.38), 6.0, rock, root, moss=True)
-        boulder('b1', (-0.28, 0.2, 0.17), (0.25, 0.26, 0.24), 7.0, rock, root)
-        drift = noise_mat('driftwood', '#a99a80', '#d2c5aa', 10, kind='wood')
-        limb('log', (-0.48, -0.18, 0.12), (0.46, -0.32, 0.13), 0.11, drift, root)
-        limb('branch', (0.1, -0.27, 0.16), (0.3, -0.05, 0.36), 0.035, drift, root)
-    if stretch:
-        root.scale.y = 1 / SIN
+    sy = 1 / SIN if stretch else 1
+    stone = [noise_mat('stoneA', '#a39b8b', '#c9bfaa', 5, brick=2.2),
+             noise_mat('stoneB', '#8f8a80', '#b8b1a3', 5, brick=2.2),
+             noise_mat('stoneC', '#ad9877', '#d1bd99', 5, brick=2.2)][v]
+    prim('cube', 'block', (0, 0, 0.45), (0.98, 0.98 * sy, 0.9), stone, root, bevel=0.05, smooth=False)
+    moss = noise_mat('moss', '#5f7f3a', '#8aa458', 9)
+    prim('cube', 'moss', (0, 0, 0.905), (0.9, 0.9 * sy, 0.05), moss, root, bevel=0.025, smooth=False)
+    rng = random.Random(v)
+    for i in range(3 if v == 1 else 2):
+        prim('ico', 'pebble', (rng.uniform(-0.4, 0.4), -0.5 * sy - 0.04, 0.05), (0.09, 0.07 * sy, 0.06),
+             noise_mat('rock', '#8d897f', '#c2bcae', 6, kind='rock'), root)
     return root
 
 
@@ -644,7 +639,8 @@ def render_props(manifest):
 
 def game_map():
     """Read the map + crate spots from shared/game.js so art and gameplay never drift apart."""
-    src = open(os.path.join(os.path.dirname(OUT), '..', 'shared', 'game.js')).read()
+    here = os.path.dirname(os.path.abspath(globals().get('__file__') or 'tools/blender/build_assets.py'))
+    src = open(os.path.join(here, '..', '..', 'shared', 'game.js')).read()
     quad = src.split('const QUADRANT = [')[1].split('];')[0]
     rows = [ln.strip().strip(',').strip("'") for ln in quad.strip().splitlines() if ln.strip().startswith("'")]
     n = len(rows) * 2
@@ -659,7 +655,7 @@ def smoothstep(e0, e1, x):
     return t * t * (3 - 2 * t)
 
 
-def ground_masks(n, margin, res_per_bu):
+def ground_masks(n, margin, res_per_bu, rows=None):
     size = n + 2 * margin
     px = int(size * res_per_bu)
     g = (np.arange(px) + 0.5) / res_per_bu - margin
@@ -669,15 +665,15 @@ def ground_masks(n, margin, res_per_bu):
     rad = np.hypot(dx, dy)
     ang = np.arctan2(dy, dx)
     wob = 0.12 * np.sin(ang * 7) + 0.08 * np.sin(ang * 13 + 1)
-    ring = smoothstep(0.75, 0.55, np.abs(rad - 11.4 + wob))
+    ring = smoothstep(0.75, 0.55, np.abs(rad - n * 0.37 + wob))
     spokes = np.zeros_like(rad)
     for k in range(4):
         a = math.pi / 4 + k * math.pi / 2
         along = dx * math.cos(a) + dy * math.sin(a)
         across = np.abs(-dx * math.sin(a) + dy * math.cos(a)) + 0.1 * np.sin(along * 1.7)
-        spokes = np.maximum(spokes, smoothstep(0.62, 0.42, across) * (along > 2) * (along < 15.5))
+        spokes = np.maximum(spokes, smoothstep(0.62, 0.42, across) * (along > 2) * (along < n * 0.6))
     path = np.maximum(ring, spokes)
-    plaza = smoothstep(3.2, 2.9, rad + 0.05 * np.sin(ang * 9))
+    plaza = smoothstep(n * 0.09, n * 0.09 - 0.3, rad + 0.05 * np.sin(ang * 9))
     inside = smoothstep(-0.02, 0.06, np.minimum(np.minimum(X, n - X), np.minimum(Y, n - Y)))
     # Rounded-square island: arena plus a sandy beach
     half = n / 2 + 0.85
@@ -687,6 +683,33 @@ def ground_masks(n, margin, res_per_bu):
     sd += 0.12 * np.sin(X * 2.1) * np.sin(Y * 1.7)
     land = smoothstep(0.05, -0.05, sd)
     shore = np.clip(sd / 2.0, 0, 1)
+    # Ponds: rounded water pools carved out of the arena wherever the map has 'w' tiles.
+    # Each connected group of 'w' tiles becomes one rounded, slightly wobbly pool.
+    pond_sd = np.full_like(sd, 9.0)
+    seen = set()
+    for r0, row in enumerate(rows or []):
+        for c0, ch in enumerate(row):
+            if ch != 'w' or (r0, c0) in seen:
+                continue
+            stack, cells = [(r0, c0)], []
+            seen.add((r0, c0))
+            while stack:
+                r, c = stack.pop()
+                cells.append((r, c))
+                for rr, cc in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)):
+                    if 0 <= rr < len(rows) and 0 <= cc < len(rows[0]) and rows[rr][cc] == 'w' and (rr, cc) not in seen:
+                        seen.add((rr, cc))
+                        stack.append((rr, cc))
+            rs, cs = [r for r, _ in cells], [c for _, c in cells]
+            cx2, cy2 = (min(cs) + max(cs) + 1) / 2, (min(rs) + max(rs) + 1) / 2
+            hx, hy, rad2 = (max(cs) - min(cs) + 1) / 2, (max(rs) - min(rs) + 1) / 2, 0.55
+            qx2, qy2 = np.abs(X - cx2) - hx + rad2, np.abs(Y - cy2) - hy + rad2
+            t_sd = np.hypot(np.maximum(qx2, 0), np.maximum(qy2, 0)) + np.minimum(np.maximum(qx2, qy2), 0) - rad2
+            pond_sd = np.minimum(pond_sd, t_sd + 0.05 * np.sin(X * 4.1) * np.sin(Y * 3.7))
+    in_pond = pond_sd < 0.05
+    land = land * smoothstep(-0.05, 0.05, pond_sd)
+    inside = inside * smoothstep(-0.05, 0.05, pond_sd)
+    shore = np.where(in_pond, 0.35 + 0.65 * np.clip(-pond_sd / 0.6, 0, 1), shore)
     foam = smoothstep(0.0, 0.08, sd) * smoothstep(0.45, 0.15, sd + 0.06 * np.sin(X * 5 + Y * 3))
     a = np.stack([path * inside, plaza * inside, inside, np.ones_like(rad)], -1)
     b = np.stack([land, shore, foam, np.ones_like(rad)], -1)
@@ -805,9 +828,9 @@ def render_ground(manifest):
     n = len(rows)
     margin = 3
     size = n + 2 * margin
-    res_px_per_bu = 96  # 1.5 image pixels per game pixel
+    res_px_per_bu = 72  # keeps the 2D fallback map under mobile image-size limits
     res = int(size * res_px_per_bu)
-    mask_a, mask_b, _ = ground_masks(n, margin, 24)
+    mask_a, mask_b, _ = ground_masks(n, margin, 24, rows)
     gmat = ground_material(mask_image('maskA', mask_a), mask_image('maskB', mask_b))
 
     def to_b(gx, gy, z=0.0):

@@ -6,7 +6,7 @@ export const TICK_RATE = 30;
 export const DT = 1 / TICK_RATE;
 
 export const TILE = 64;
-export const MAP_TILES = 30;
+export const MAP_TILES = 40;
 export const WORLD = TILE * MAP_TILES;
 export const CENTER = WORLD / 2;
 
@@ -24,13 +24,32 @@ export const CUBE_DMG = 0.1; // +10% damage per power cube
 export const CUBE_PICKUP = 44;
 export const START_CUBES = 6;
 export const COUNTDOWN = 3;
-export const POISON = { start: 20, end: 110, startR: 1420, endR: 150, dps: 900 };
+export const POISON = { start: 30, end: 150, startR: 1880, endR: 220, dps: 900 };
 export const CRATE_R = 28;
 export const CRATE_HP = 2600;
 export const GHOST_SPEED = 300;
 // Ghost Mode: knocked-out players float through walls and drop haunts that slow and hurt survivors.
 export const HAUNT = { radius: 85, life: 3, cooldown: 5, slow: 0.5, dps: 220 };
 export const EMOTES = ['👍', '😂', '😡', 'GG'];
+export const RESPAWN_TIME = 3;
+export const GEM = { every: 6, toWin: 10, countdown: 15, pickup: 44 };
+
+// Game modes, Brawl Stars style. Teams are 0 (blue) and 1 (red).
+export const MODES = {
+  showdown: {
+    name: 'Showdown', icon: '☠', teams: false, respawn: false,
+    blurb: 'Every brawler for themselves. Poison closes in. Last one standing wins.',
+  },
+  gemgrab: {
+    name: 'Gem Grab', icon: '💎', teams: true, respawn: true, duration: 150,
+    blurb: 'Two teams. Grab gems from the mine and hold 10 for 15 seconds to win.',
+  },
+  bounty: {
+    name: 'Bounty', icon: '⭐', teams: false, respawn: true, duration: 120,
+    blurb: 'Knock brawlers out to steal their stars. Respawn and keep hunting. Most stars wins.',
+  },
+};
+export const MODE_IDS = Object.keys(MODES);
 
 export const BRAWLERS = {
   brick: {
@@ -60,29 +79,35 @@ export const BRAWLERS = {
 };
 export const BRAWLER_IDS = Object.keys(BRAWLERS);
 
-// '.' floor, '#' wall, '*' bush. One quadrant, mirrored four ways so the map is fair from every spawn.
+// '.' floor, '#' wall, '*' bush, 'w' water (blocks walking, not shots).
+// One 20x20 quadrant, mirrored four ways so the map is fair from every spawn and for both teams.
 const QUADRANT = [
-  '...............',
-  '.##......**....',
-  '.#.......**..#.',
-  '.....#.......#.',
-  '..**.#...##....',
-  '..**.....##....',
-  '...............',
-  '.###....**..#..',
-  '........**..#..',
-  '....#.......#..',
-  '**..#...###....',
-  '**.............',
-  '.......**...##.',
-  '..##...**...#..',
-  '...............',
+  '....................',
+  '.**.....##......**..',
+  '.**...........#.**..',
+  '......###.....#.....',
+  '..#...........#..##.',
+  '..#...**..........#.',
+  '..#...**..###.....#.',
+  '...............*....',
+  '.###...ww.....***...',
+  '.......ww......*....',
+  '...**.......#.......',
+  '...**...#...#...###.',
+  '........#...........',
+  '.##.....#...**......',
+  '.............**..#..',
+  '..***...##.......#..',
+  '..***...........##..',
+  '.......#............',
+  '...#...#.....**.....',
+  '...#.........**.....',
 ];
 
 export const MAP = (() => {
   const half = MAP_TILES / 2;
   if (QUADRANT.length !== half || QUADRANT.some((row) => row.length !== half)) {
-    throw new Error('Map quadrant must be 15x15');
+    throw new Error(`Map quadrant must be ${half}x${half}`);
   }
   const rows = [];
   for (let r = 0; r < MAP_TILES; r++) {
@@ -104,6 +129,7 @@ export function tileAt(x, y) {
   return MAP[r][c];
 }
 export const isWallAt = (x, y) => tileAt(x, y) === '#';
+const SOLID = new Set(['#', 'w']);
 export const inBush = (x, y) => tileAt(x, y) === '*';
 
 // Push a circle out of any wall tiles it overlaps, and keep it inside the world.
@@ -116,7 +142,7 @@ export function resolveWalls(p, radius) {
   const r1 = Math.floor((p.y + radius) / TILE);
   for (let r = r0; r <= r1; r++) {
     for (let c = c0; c <= c1; c++) {
-      if (MAP[r]?.[c] !== '#') continue;
+      if (!SOLID.has(MAP[r]?.[c])) continue;
       const left = c * TILE, top = r * TILE, right = left + TILE, bottom = top + TILE;
       const nx = clamp(p.x, left, right);
       const ny = clamp(p.y, top, bottom);
@@ -223,7 +249,7 @@ export function nearestFloor(x, y) {
 }
 
 // Crate spots in one quadrant (row, col), mirrored four ways like the map.
-const CRATE_TILES = [[6, 6], [11, 7], [2, 4]];
+const CRATE_TILES = [[5, 12], [10, 7], [14, 4], [3, 17]];
 export function crateSpots() {
   const spots = [];
   for (const [r, c] of CRATE_TILES) {
@@ -239,7 +265,18 @@ export function spawnPoints(n) {
   const offset = Math.random() * Math.PI * 2;
   for (let i = 0; i < n; i++) {
     const a = offset + (i / n) * Math.PI * 2;
-    pts.push(nearestFloor(CENTER + Math.cos(a) * 740, CENTER + Math.sin(a) * 740));
+    pts.push(nearestFloor(CENTER + Math.cos(a) * WORLD * 0.37, CENTER + Math.sin(a) * WORLD * 0.37));
   }
   return pts;
+}
+
+// Team bases: blue along the south edge, red along the north edge.
+export function teamBase(team) {
+  return { x: CENTER, y: team === 0 ? WORLD - TILE * 2.5 : TILE * 2.5 };
+}
+
+export function teamSpawn(team, index) {
+  const b = teamBase(team);
+  const offset = (index % 2 ? 1 : -1) * Math.ceil(index / 2) * TILE * 2.2;
+  return nearestFloor(b.x + offset, b.y);
 }

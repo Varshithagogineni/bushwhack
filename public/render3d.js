@@ -7,7 +7,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { MAP, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON } from '/shared/game.js';
+import { MAP, MAP_TILES, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON, MODES } from '/shared/game.js';
 import { Renderer } from './render.js';
 
 const U = 1 / TILE; // game pixels -> world units (1 unit = 1 tile)
@@ -15,6 +15,9 @@ const CHAR_SCALE = 1.25;
 const PIVOTS = ['legL', 'legR', 'upper', 'armLpiv'];
 const ME = '#3ccf6e';
 const FOE = '#ff4d4f';
+const ALLY = '#4aa3ff';
+const N = MAP_TILES;
+const C = N / 2;
 
 const rand = (seed) => () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
 
@@ -68,7 +71,7 @@ export class Renderer3D extends Renderer {
     // Frame roughly the same play area as the 2D view on every screen shape.
     const visibleW = this.w / this.scale * U;
     const hfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect);
-    this.camDist = visibleW / 2 / Math.tan(hfov / 2) * 0.84;
+    this.camDist = visibleW / 2 / Math.tan(hfov / 2) * 0.96;
     this.camera.updateProjectionMatrix();
     if (this.composer) {
       this.composer.setPixelRatio(this.gl.getPixelRatio());
@@ -76,7 +79,7 @@ export class Renderer3D extends Renderer {
       const px = this.gl.getPixelRatio();
       for (const pass of [this.tiltH, this.tiltV]) {
         pass.uniforms.texel.value.set(1 / (this.w * px), 1 / (this.h * px));
-        pass.uniforms.amount.value = 2.6 * Math.min(1, this.h / 850); // gentler on short phone screens
+        pass.uniforms.amount.value = 1.8 * Math.min(1, this.h / 850); // gentler on short phone screens
       }
     }
   }
@@ -119,6 +122,7 @@ export class Renderer3D extends Renderer {
     this.buildPoison();
     this.buildStatic();
     this.buildDecor(albedo.image);
+    this.buildGemMine();
     this.setupPost();
     this.resize();
     this.ready = true;
@@ -458,8 +462,8 @@ export class Renderer3D extends Renderer {
     // Grass tufts that sway in the wind.
     const tuft = this.makeTuft();
     const tufts = [];
-    for (let i = 0; tufts.length < 3600 && i < 30000; i++) {
-      const x = rnd() * 30, z = rnd() * 30;
+    for (let i = 0; tufts.length < 6000 && i < 50000; i++) {
+      const x = rnd() * N, z = rnd() * N;
       if (!open(x, z) || !isGrass(x, z)) continue;
       const s = 0.7 + rnd() * 0.7;
       tufts.push(new THREE.Matrix4().compose(new THREE.Vector3(x, 0, z),
@@ -475,8 +479,8 @@ export class Renderer3D extends Renderer {
     const flowerMat = new THREE.MeshStandardMaterial({ roughness: 0.6 });
     const palette = ['#ffffff', '#fff3a8', '#ff9ec7', '#c9a7ff', '#ffb27a'].map((c) => new THREE.Color(c));
     const flowers = [];
-    for (let i = 0; flowers.length < 700 && i < 20000; i++) {
-      const x = rnd() * 30, z = rnd() * 30;
+    for (let i = 0; flowers.length < 1200 && i < 40000; i++) {
+      const x = rnd() * N, z = rnd() * N;
       if (!open(x, z) || !isGrass(x, z)) continue;
       const col = palette[Math.floor(rnd() * palette.length)];
       for (let k = 0; k < 3; k++) flowers.push([x + (rnd() - 0.5) * 0.25, z + (rnd() - 0.5) * 0.25, col]);
@@ -492,19 +496,19 @@ export class Renderer3D extends Renderer {
     const ring = (d, count, jitter) => Array.from({ length: count }, (_, i) => {
       const t = i / count * 4;
       const side = Math.floor(t), f = t - side;
-      const along = -1.5 + f * 33 + (rnd() - 0.5) * jitter;
+      const along = -1.5 + f * (N + 3) + (rnd() - 0.5) * jitter;
       const off = d + (rnd() - 0.5) * jitter * 0.3;
-      return [[along, -off], [30 + off, along], [30 - along, 30 + off], [-off, 30 - along]][side];
+      return [[along, -off], [N + off, along], [N - along, N + off], [-off, N - along]][side];
     });
     const place = (name, pts, scale = 1, yaw = true) => this.instanced(name, pts.map(([x, z]) => new THREE.Matrix4().compose(
       new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw ? rnd() * Math.PI * 2 : 0),
       new THREE.Vector3().setScalar(scale * (0.85 + rnd() * 0.35)))));
     // Palms lean out toward the sea so their crowns never hide the arena.
     // None on the south beach: the camera looks north, so they'd block the bottom of the screen.
-    const palms = ring(0.5, 34, 1.0).filter(([, z]) => z < 29);
+    const palms = ring(0.5, 44, 1.0).filter(([, z]) => z < N - 1);
     for (const v of [0, 1]) {
       this.instanced(`palm${v}`, palms.filter((_, i) => i % 2 === v).map(([x, z]) => new THREE.Matrix4().compose(
-        new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(-(z - 15), x - 15) + (rnd() - 0.5) * 0.6),
+        new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(-(z - C), x - C) + (rnd() - 0.5) * 0.6),
         new THREE.Vector3().setScalar(0.85 + rnd() * 0.3))));
     }
     for (let v = 0; v < 3; v++) {
@@ -517,12 +521,12 @@ export class Renderer3D extends Renderer {
     const body = new THREE.SphereGeometry(0.1, 10, 6).scale(1, 0.4, 0.5);
     const tail = new THREE.ConeGeometry(0.06, 0.1, 4).rotateZ(Math.PI / 2).translate(-0.13, 0, 0);
     this.fish = new THREE.InstancedMesh(mergeGeometries([body, tail]), new THREE.MeshStandardMaterial({ color: '#41606a', roughness: 0.5 }), 40);
-    this.fishData = ring(2.1, 40, 3.5).map(([x, z]) => ({ x, z, r: 0.35 + rnd() * 0.8, w: (0.4 + rnd() * 0.6) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * 6.28, s: 0.7 + rnd() * 0.6 }));
+    this.fishData = ring(2.1, 50, 3.5).map(([x, z]) => ({ x, z, r: 0.35 + rnd() * 0.8, w: (0.4 + rnd() * 0.6) * (rnd() < 0.5 ? -1 : 1), ph: rnd() * 6.28, s: 0.7 + rnd() * 0.6 }));
     this.scene.add(this.fish);
     // Crabs scuttling sideways along the beach.
-    this.crabs = this.dynamicInstanced('crab', 8);
-    this.crabData = ring(0.32, 8, 4).map(([x, z]) => {
-      const out = Math.atan2(z - 15, x - 15);
+    this.crabs = this.dynamicInstanced('crab', 10);
+    this.crabData = ring(0.32, 10, 4).map(([x, z]) => {
+      const out = Math.atan2(z - C, x - C);
       return { x, z, tx: -Math.sin(out), tz: Math.cos(out), yaw: -out + Math.PI / 2, ph: rnd() * 6.28, sp: 0.5 + rnd() * 0.6 };
     });
   }
@@ -562,6 +566,39 @@ export class Renderer3D extends Renderer {
       this.crabs.set(i, m.compose(pos, q, sc.setScalar(1.3)));
     });
     this.crabs.commit();
+  }
+
+  buildGemMine() {
+    this.gemObjs = new Map();
+    this.gemGeo = new THREE.OctahedronGeometry(0.2, 0).scale(0.8, 1.25, 0.8);
+    this.gemMat = new THREE.MeshStandardMaterial({ color: '#b56cf0', emissive: '#7a2fd0', emissiveIntensity: 0.9, roughness: 0.15, metalness: 0.1 });
+    const mine = new THREE.Group();
+    const stone = new THREE.MeshStandardMaterial({ color: '#8f8a80', roughness: 0.9 });
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(0.22 + (i % 3) * 0.04, 0), stone);
+      rock.position.set(Math.cos(a) * 0.85, 0.12, Math.sin(a) * 0.85);
+      rock.rotation.set(i, i * 2, 0);
+      rock.castShadow = true;
+      mine.add(rock);
+    }
+    const pit = new THREE.Mesh(new THREE.CircleGeometry(0.75, 32).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: '#3b2f40', roughness: 1 }));
+    pit.position.y = 0.02;
+    const crystal = new THREE.Group();
+    for (let i = 0; i < 5; i++) {
+      const c = new THREE.Mesh(this.gemGeo, this.gemMat);
+      const a = (i / 5) * Math.PI * 2;
+      c.position.set(Math.cos(a) * 0.25, 0.25 + (i % 2) * 0.1, Math.sin(a) * 0.25);
+      c.rotation.set(Math.cos(a) * 0.5, 0, Math.sin(a) * 0.5);
+      c.scale.setScalar(1.2 + (i % 3) * 0.3);
+      crystal.add(c);
+    }
+    mine.add(pit, crystal);
+    mine.userData.crystal = crystal;
+    mine.position.set(C, 0, C);
+    mine.visible = false;
+    this.gemMine = mine;
+    this.scene.add(mine);
   }
 
   makeTuft() {
@@ -616,15 +653,21 @@ export class Renderer3D extends Renderer {
       const holder = new THREE.Group();
       holder.add(obj, ring);
       this.scene.add(holder);
-      e = { obj: holder, model: obj, mats: [...mats.values()], piv, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
+      e = { obj: holder, model: obj, ring, mats: [...mats.values()], piv, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
       this.players.set(p.id, e);
     }
     e.seen = true;
     return e;
   }
 
+  colorOf(p) {
+    if (p.isMe) return ME;
+    return this.teams && p.team === this.myTeam ? ALLY : FOE;
+  }
+
   updatePlayer(p, now, dt, flash) {
     const e = this.charObj(p);
+    e.ring.material.color.set(this.colorOf(p));
     const x = p.x * U, z = p.y * U;
     const moved = e.last ? Math.hypot(x - e.last.x, z - e.last.z) : 0;
     e.last = { x, z };
@@ -687,7 +730,7 @@ export class Renderer3D extends Renderer {
       this.floaters.push({ ...e, born: now, life: 0.9 });
       return;
     }
-    if (e.k === 'cube') { this.floaters.push({ ...e, born: now, life: 0.9 }); return; }
+    if (e.k === 'cube' || e.k === 'gem') { this.floaters.push({ ...e, born: now, life: 0.9 }); return; }
     if (!this.ready) return;
     const at = new THREE.Vector3(e.x * U, 0, e.y * U);
     const add = (obj, life, update) => { this.scene.add(obj); this.fx.push({ obj, born: now, life, update }); };
@@ -730,13 +773,99 @@ export class Renderer3D extends Renderer {
     } else if (e.k === 'crate') {
       const c = [...this.crateObjs.values()].find((o) => Math.hypot(o.obj.position.x - at.x, o.obj.position.z - at.z) < 0.3);
       if (c) c.hitAt = now;
-    } else if (e.k === 'haunt' || e.k === 'super') {
+    } else if (e.k === 'haunt' || e.k === 'super' || e.k === 'spawn' || e.k === 'gemspawn') {
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 48).rotateX(-Math.PI / 2),
-        new THREE.MeshBasicMaterial({ color: e.k === 'haunt' ? '#be96ff' : '#ffd63c', transparent: true, depthWrite: false }));
+        new THREE.MeshBasicMaterial({ color: { haunt: '#be96ff', super: '#ffd63c', spawn: '#7fe3c0', gemspawn: '#c97bff' }[e.k], transparent: true, depthWrite: false }));
       ring.position.copy(at).setY(0.06);
       const R = e.k === 'haunt' ? HAUNT.radius * U : 0.9;
       add(ring, 0.55, (k) => { ring.scale.setScalar(R * (0.3 + k)); ring.material.opacity = 1 - k; });
     }
+  }
+
+  // ------------------------------------------------------------ lobby stage: your brawler on a little island
+
+  createStage(canvas) {
+    const gl = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    gl.outputColorSpace = THREE.SRGBColorSpace;
+    gl.toneMapping = THREE.ACESFilmicToneMapping;
+    gl.shadowMap.enabled = true;
+    gl.shadowMap.type = THREE.PCFSoftShadowMap;
+    gl.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+    const scene = new THREE.Scene();
+    scene.add(new THREE.HemisphereLight('#cfe3ec', '#8c7a52', 1.1));
+    const sun = new THREE.DirectionalLight('#ffd9a0', 2.8);
+    sun.position.set(-3, 5, 4);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    Object.assign(sun.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3 });
+    scene.add(sun);
+    const island = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.4, 0.4, 48),
+      new THREE.MeshStandardMaterial({ color: '#7b9a4c', roughness: 0.95 }));
+    island.position.y = -0.2;
+    island.receiveShadow = true;
+    const sand = new THREE.Mesh(new THREE.CylinderGeometry(2.45, 2.6, 0.3, 48), new THREE.MeshStandardMaterial({ color: '#dcc7a0', roughness: 1 }));
+    sand.position.y = -0.3;
+    scene.add(island, sand);
+    const prop = (name, x, z, sc, rot = 0) => {
+      const o = this.models[name].clone(true);
+      o.position.set(x, 0, z);
+      o.scale.setScalar(sc);
+      o.rotation.y = rot;
+      scene.add(o);
+    };
+    prop('bush0', -1.45, -0.9, 1.1);
+    prop('bush2', 1.5, -1.0, 1.0, 1);
+    prop('wall0', 0.2, -1.6, 0.9);
+    prop('palm1', 1.9, -1.7, 0.7, 2.2);
+    prop('crate', -1.5, 0.6, 0.6, 0.4);
+    const tuft = this.makeTuft();
+    const tufts = new THREE.InstancedMesh(tuft.geometry, tuft.material, 90);
+    const rnd = rand(77);
+    for (let i = 0; i < 90; i++) {
+      const a = rnd() * Math.PI * 2, r = 0.7 + rnd() * 1.4;
+      tufts.setMatrixAt(i, new THREE.Matrix4().compose(new THREE.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rnd() * 6), new THREE.Vector3().setScalar(1 + rnd())));
+    }
+    scene.add(tufts);
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
+    camera.position.set(0, 2.1, 5.4);
+    camera.lookAt(0, 0.75, 0);
+    let hero = null, piv = {}, current = null, running = false;
+    const stage = {
+      setBrawler: (id) => {
+        if (id === current || !this.models[id]) return;
+        current = id;
+        if (hero) scene.remove(hero);
+        hero = this.models[id].clone(true);
+        hero.scale.setScalar(CHAR_SCALE * 1.15);
+        piv = {};
+        hero.traverse((o) => { if (PIVOTS.includes(o.name)) piv[o.name] = o; if (o.isMesh) o.castShadow = true; });
+        scene.add(hero);
+      },
+      start: () => {
+        if (running) return;
+        running = true;
+        const loop = (now) => {
+          if (!running) return;
+          requestAnimationFrame(loop);
+          const w = canvas.clientWidth, h = canvas.clientHeight;
+          if (!w || !h) return;
+          if (canvas.width !== Math.round(w * gl.getPixelRatio())) { gl.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+          const t = now / 1000;
+          this.uniforms.time.value = t;
+          if (hero) {
+            hero.rotation.y = 0.35 * Math.sin(t * 0.5);
+            const s2 = Math.sin(t * 2.2);
+            if (piv.upper) piv.upper.position.y = 0.015 * s2;
+            if (piv.armLpiv) piv.armLpiv.rotation.x = 0.15 * s2;
+          }
+          gl.render(scene, camera);
+        };
+        requestAnimationFrame(loop);
+      },
+      stop: () => { running = false; },
+    };
+    return stage;
   }
 
   // ------------------------------------------------------------ projection helpers (used by input/aim)
@@ -760,6 +889,8 @@ export class Renderer3D extends Renderer {
     const dt = Math.min(0.1, (now - (this.lastNow ?? now)) / 1000);
     this.lastNow = now;
     this.me = v.me;
+    this.teams = MODES[v.mode]?.teams;
+    this.myTeam = v.me?.team;
     const t = now / 1000;
     this.uniforms.time.value = t;
     const flashOf = (id) => { const at = this.flashes.get(id); return at ? Math.max(0, 1 - (now - at) / 140) : 0; };
@@ -767,7 +898,7 @@ export class Renderer3D extends Renderer {
     // Camera follows the view's camera point, high and tilted like a diorama.
     this.shakeAmt *= 0.88;
     this.camTarget.set(v.cam.x * U, 0, v.cam.y * U);
-    const pitch = THREE.MathUtils.degToRad(50);
+    const pitch = THREE.MathUtils.degToRad(53);
     this.camera.position.set(
       this.camTarget.x + (Math.random() - 0.5) * this.shakeAmt * 0.02,
       this.camDist * Math.sin(pitch),
@@ -884,6 +1015,24 @@ export class Renderer3D extends Renderer {
       o.obj.position.set(p.x * U, 0.75, p.y * U);
     });
 
+    // Gems and the mine they come from
+    this.gemMine.visible = v.mode === 'gemgrab';
+    if (this.gemMine.visible) this.gemMine.userData.crystal.rotation.y = t * 0.6;
+    this.syncMap(this.gemObjs, v.gems ?? [], () => {
+      const obj = new THREE.Group();
+      const gem = new THREE.Mesh(this.gemGeo, this.gemMat);
+      gem.castShadow = true;
+      const glow = new THREE.Sprite(this.glowMat('g'));
+      glow.scale.setScalar(0.9);
+      obj.add(gem, glow);
+      obj.userData.gem = gem;
+      this.scene.add(obj);
+      return { obj };
+    }, (o, g) => {
+      o.obj.position.set(g.x * U, 0.35 + Math.sin(t * 3 + g.i) * 0.08, g.y * U);
+      o.obj.userData.gem.rotation.y = t * 2 + g.i;
+    });
+
     // Haunt zones
     this.syncMap(this.hauntObjs, v.haunts, (h) => {
       const disc = new THREE.Mesh(new THREE.CircleGeometry(h.r * U, 40).rotateX(-Math.PI / 2),
@@ -920,7 +1069,7 @@ export class Renderer3D extends Renderer {
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const g = c.getContext('2d');
-    const col = { b: '255,225,77', p: '255,138,0', v: '40,200,255' }[kind];
+    const col = { b: '255,225,77', p: '255,138,0', v: '40,200,255', g: '190,110,255' }[kind];
     const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
     grd.addColorStop(0, `rgba(${col},0.9)`);
     grd.addColorStop(1, `rgba(${col},0)`);
@@ -995,7 +1144,7 @@ export class Renderer3D extends Renderer {
       const w = 64, h = 10;
       ctx.fillStyle = 'rgba(0,0,0,0.65)';
       ctx.fillRect(s.x - w / 2 - 2, s.y - 10, w + 4, h + 4);
-      ctx.fillStyle = p.isMe ? ME : FOE;
+      ctx.fillStyle = this.colorOf(p);
       ctx.fillRect(s.x - w / 2, s.y - 8, Math.max(0, w * (p.hp / p.maxHp)), h);
       ctx.font = 'bold 11px system-ui';
       ctx.fillStyle = '#fff';
@@ -1007,7 +1156,14 @@ export class Renderer3D extends Renderer {
         ctx.font = 'bold 12px system-ui';
         ctx.fillText(p.cubes, s.x + w / 2 + 15, s.y + 2);
       }
-      if (p.em != null) this.bubbleAt(s.x, s.y - 36, EMOTES[p.em]);
+      const badge = v.mode === 'gemgrab' && p.gems > 0 ? `💎 ${p.gems}` : v.mode === 'bounty' ? `⭐ ${p.stars ?? 2}` : '';
+      if (badge) {
+        ctx.font = '18px "Patrick Hand", system-ui';
+        ctx.strokeText(badge, s.x, s.y - 36);
+        ctx.fillStyle = v.mode === 'bounty' ? '#ffd56a' : '#e3b8ff';
+        ctx.fillText(badge, s.x, s.y - 36);
+      }
+      if (p.em != null) this.bubbleAt(s.x, s.y - (badge ? 56 : 36), EMOTES[p.em]);
       if (p.isMe && v.me) {
         const f = this.toScreen(null, p.x, p.y, 0);
         const seg = 18, gap = 3, total = MAX_AMMO * seg + (MAX_AMMO - 1) * gap;
@@ -1044,12 +1200,12 @@ export class Renderer3D extends Renderer {
     for (const f of this.floaters) {
       const k = (now - f.born) / 1000 / f.life;
       const s = this.toScreen(null, f.x, f.y, 2.0);
-      const text = f.k === 'dmg' ? `-${f.a}` : '+1 ⚡';
+      const text = f.k === 'dmg' ? `-${f.a}` : f.k === 'gem' ? '+1 💎' : '+1 ⚡';
       ctx.font = `900 ${f.k === 'dmg' ? 20 : 18}px system-ui`;
       ctx.globalAlpha = 1 - k * k;
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.fillStyle = f.k === 'cube' ? '#6dff9c' : f.src === 'poison' ? '#9dffa8' : f.src === 'haunt' ? '#cdb6ff' : '#ffdf5d';
+      ctx.fillStyle = f.k === 'gem' ? '#e3b8ff' : f.k === 'cube' ? '#6dff9c' : f.src === 'poison' ? '#9dffa8' : f.src === 'haunt' ? '#cdb6ff' : '#ffdf5d';
       const x = s.x + ((f.id ?? 1) % 3 - 1) * 14, y = s.y - 20 - k * 40;
       ctx.strokeText(text, x, y);
       ctx.fillText(text, x, y);

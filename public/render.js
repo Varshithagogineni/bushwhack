@@ -21,6 +21,11 @@ function buildLayers() {
   // Walls: a darker front face under a lighter top, so they read as raised blocks.
   for (let r = 0; r < MAP_TILES; r++) {
     for (let c = 0; c < MAP_TILES; c++) {
+      if (MAP[r][c] === 'w') {
+        g.fillStyle = '#4cb3a5';
+        g.fillRect(c * TILE, r * TILE, TILE, TILE);
+        continue;
+      }
       if (MAP[r][c] !== '#') continue;
       const x = c * TILE, y = r * TILE;
       g.fillStyle = '#6b4128';

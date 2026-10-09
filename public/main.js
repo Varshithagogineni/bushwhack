@@ -1,5 +1,5 @@
 import {
-  DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES,
+  DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES, MODES, MODE_IDS,
   movePlayer, moveGhost, speedFactor, round2, inBush,
 } from '/shared/game.js';
 import { Input } from './input.js';
@@ -44,6 +44,7 @@ const net = {
 
 const canvas = $('canvas');
 let renderer = new Renderer(canvas);
+let stage = null; // 3D brawler preview in the lobby
 // Upgrade to the real-time 3D renderer when WebGL works; the 2D one stays as the fallback.
 try {
   const probe = document.createElement('canvas');
@@ -53,6 +54,9 @@ try {
         const r3 = new Renderer3D(canvas);
         await r3.load();
         renderer = r3;
+        stage = r3.createStage($('stage'));
+        stage.setBrawler(myBrawler());
+        if (!$('lobby').classList.contains('hidden')) stage.start();
       })
       .catch((e) => console.warn('3D renderer unavailable, using 2D.', e));
   }
@@ -130,6 +134,7 @@ function showScreen(name) {
   $('lobby').classList.toggle('hidden', name !== 'lobby');
   $('game').classList.toggle('hidden', name !== 'game');
   document.body.style.overflow = name === 'game' ? 'hidden' : '';
+  if (stage) (name === 'lobby' ? stage.start : stage.stop)();
 }
 
 const playerById = (id) => app.room?.players.find((p) => p.id === id);
@@ -202,42 +207,98 @@ function renderQr() {
   }
 }
 
+function buildModeCards() {
+  const wrap = $('modeCards');
+  wrap.innerHTML = '';
+  for (const id of MODE_IDS) {
+    const m = MODES[id];
+    const card = document.createElement('button');
+    card.className = 'mode';
+    card.dataset.id = id;
+    const el = (cls, text) => Object.assign(document.createElement('div'), { className: cls, textContent: text });
+    card.append(el('icon', m.icon), el('name', m.name), el('blurb', m.blurb));
+    card.addEventListener('click', () => send({ t: 'mode', mode: id }));
+    wrap.append(card);
+  }
+}
+
+function playerRow(p, room) {
+  const li = document.createElement('li');
+  if (!p.connected) li.classList.add('offline');
+  const dot = document.createElement('span');
+  dot.className = 'dot';
+  dot.style.background = BRAWLERS[p.brawler].color;
+  const who = document.createElement('span');
+  who.className = 'who';
+  who.textContent = `${p.name} · ${BRAWLERS[p.brawler].name}`;
+  li.append(dot, who);
+  const tag = (text, cls) => li.append(Object.assign(document.createElement('span'), { className: `tag ${cls}`, textContent: text }));
+  if (p.wins) tag(`🏆 ${p.wins}`, 'wins');
+  if (p.id === app.myId) tag('YOU', 'you');
+  if (p.id === room.hostId) tag('HOST', 'host');
+  if (!p.connected && !p.bot) tag('offline', '');
+  return li;
+}
+
 function renderLobby() {
   const room = app.room;
   if (!room) return;
   $('roomCode').textContent = room.code;
   const mine = myBrawler();
+  const b = BRAWLERS[mine];
   for (const card of $('brawlerCards').children) card.classList.toggle('selected', card.dataset.id === mine);
+  $('stageName').textContent = b.name;
+  $('stageRole').textContent = b.role;
+  $('stageDesc').textContent = b.desc;
+  $('stageSuper').textContent = `⚡ ${b.super.name}: ${b.super.desc}`;
+  stage?.setBrawler(mine);
+
+  const isHost = room.hostId === app.myId;
+  const mode = MODES[room.mode] ?? MODES.showdown;
+  for (const card of $('modeCards').children) {
+    card.classList.toggle('selected', card.dataset.id === room.mode);
+    card.disabled = !isHost;
+  }
+  $('modeHint').textContent = isHost ? 'You\'re the host: pick the mode.' : `The host picks the mode. Now playing: ${mode.icon} ${mode.name}`;
 
   const list = $('playerList');
   list.innerHTML = '';
-  for (const p of room.players) {
-    const li = document.createElement('li');
-    if (!p.connected) li.classList.add('offline');
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    dot.style.background = BRAWLERS[p.brawler].color;
-    const who = document.createElement('span');
-    who.className = 'who';
-    who.textContent = `${p.name} · ${BRAWLERS[p.brawler].name}`;
-    li.append(dot, who);
-    const tag = (text, cls) => li.append(Object.assign(document.createElement('span'), { className: `tag ${cls}`, textContent: text }));
-    if (p.wins) tag(`🏆 ${p.wins}`, 'wins');
-    if (p.id === app.myId) tag('YOU', 'you');
-    if (p.id === room.hostId) tag('HOST', 'host');
-    if (!p.connected && !p.bot) tag('offline', '');
-    list.append(li);
+  if (mode.teams) {
+    const teams = document.createElement('div');
+    teams.className = 'teams';
+    for (const [t, label, cls] of [[0, 'Blue team', 'blue'], [1, 'Red team', 'red']]) {
+      const col = document.createElement('div');
+      col.className = `team ${cls}`;
+      const h = document.createElement('h3');
+      h.textContent = label;
+      if (playerById(app.myId)?.team !== t) {
+        const join = Object.assign(document.createElement('button'), { className: 'btn small ghost', textContent: 'Join' });
+        join.addEventListener('click', () => send({ t: 'team', team: t }));
+        h.append(join);
+      }
+      const ul = document.createElement('ul');
+      ul.className = 'players';
+      for (const p of room.players.filter((x) => x.team === t)) ul.append(playerRow(p, room));
+      col.append(h, ul);
+      teams.append(col);
+    }
+    list.append(teams);
+  } else {
+    const ul = document.createElement('ul');
+    ul.className = 'players';
+    for (const p of room.players) ul.append(playerRow(p, room));
+    list.append(ul);
   }
   $('playerCount').textContent = `${room.players.length}/${MAX_PLAYERS}`;
 
-  const isHost = room.hostId === app.myId;
   $('hostControls').classList.toggle('hidden', !isHost);
   $('startBtn').disabled = room.players.length < MIN_PLAYERS;
+  $('startBtn').textContent = `Play ${mode.name}`;
   $('addBotBtn').disabled = room.players.length >= MAX_PLAYERS;
   $('removeBotBtn').disabled = !room.players.some((p) => p.bot);
   const host = playerById(room.hostId);
   $('lobbyStatus').textContent = isHost
-    ? room.players.length < MIN_PLAYERS ? 'Share the code, or add a bot to play right away.' : 'Everyone ready? Hit Start.'
+    ? room.players.length < MIN_PLAYERS ? 'Share the code, or add a bot to play right away.' : 'Everyone ready? Hit Play.'
     : `Waiting for ${host?.name ?? 'the host'} to start the match…`;
 }
 
@@ -247,9 +308,17 @@ function renderResults() {
   $('results').classList.toggle('hidden', !show);
   if (!show) return;
   const mine = room.results.find((r) => r.id === app.myId);
-  const winner = room.results.find((r) => r.rank === 1);
-  $('resultTitle').textContent = !mine ? 'Match over' : mine.rank === 1 ? '🏆 Victory!' : `#${mine.rank} place`;
-  $('resultSub').textContent = winner ? `${winner.id === app.myId ? 'You' : winner.name} won as ${BRAWLERS[winner.brawler].name}` : 'Nobody survived!';
+  const winner = room.results.find((r) => r.won);
+  const teamName = (t) => (t === 0 ? 'Blue team' : 'Red team');
+  if (MODES[room.mode]?.teams) {
+    $('resultTitle').textContent = room.winnerTeam == null ? 'Draw!' : mine?.won ? '🏆 Victory!' : 'Defeat';
+    $('resultSub').textContent = room.winnerTeam == null ? 'Both teams held the same number of gems.' : `${teamName(room.winnerTeam)} wins Gem Grab`;
+  } else {
+    $('resultTitle').textContent = !mine ? 'Match over' : mine.won ? '🏆 Victory!' : `#${mine.rank} place`;
+    $('resultSub').textContent = !winner ? 'Nobody won this one!'
+      : room.mode === 'bounty' ? `${winner.id === app.myId ? 'You' : winner.name} collected the most stars (${winner.score}⭐)`
+        : `${winner.id === app.myId ? 'You' : winner.name} won as ${BRAWLERS[winner.brawler].name}`;
+  }
   const list = $('resultList');
   list.innerHTML = '';
   for (const r of room.results) {
@@ -257,10 +326,11 @@ function renderResults() {
     if (r.id === app.myId) li.classList.add('me');
     const span = (cls, text) => Object.assign(document.createElement('span'), { className: cls, textContent: text });
     const dot = span('dot', '');
-    dot.style.cssText = `width:18px;height:18px;border-radius:50%;flex:none;background:${BRAWLERS[r.brawler].color}`;
+    const teams = MODES[room.mode]?.teams;
+    dot.style.cssText = `width:18px;height:18px;border-radius:50%;flex:none;background:${BRAWLERS[r.brawler].color};${teams ? `box-shadow:0 0 0 3px ${r.team === 0 ? '#4aa3ff' : '#ff4d4f'}` : ''}`;
     li.append(
       span('rank', `#${r.rank}`), dot, span('who', r.id === app.myId ? `${r.name} (you)` : r.name),
-      span('muted', `${r.kills} KO${r.kills === 1 ? '' : 's'}`), span('wins', `🏆 ${r.wins}`),
+      span('muted', room.mode === 'bounty' ? `${r.score}⭐` : `${r.kills} KO${r.kills === 1 ? '' : 's'}`), span('wins', `🏆 ${r.wins}`),
     );
     list.append(li);
   }
@@ -269,7 +339,7 @@ function renderResults() {
   $('againHint').textContent = isHost ? '' : 'Waiting for the host… (back to lobby automatically in a few seconds)';
   if (net.resultSoundFor !== room.results) {
     net.resultSoundFor = room.results;
-    if (mine) (mine.rank === 1 ? sfx.win : sfx.lose)();
+    if (mine) (mine.won ? sfx.win : sfx.lose)();
   }
 }
 
@@ -454,6 +524,7 @@ function buildView(now) {
     players.push({
       id: pb.i, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k), hp: pb.h, maxHp: pb.m, aim: pb.a, cubes: pb.c,
       bush: pb.bush, em: pb.em, dash: pb.d, brawler: info?.brawler ?? 'brick', name: info?.name ?? '', isMe: false,
+      team: pb.t, gems: pb.g, stars: pb.st,
     });
   }
   const selfSnap = latest.pmap.get(app.myId);
@@ -461,6 +532,7 @@ function buildView(now) {
     players.push({
       id: app.myId, ...selfShown, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
       bush: inBush(selfShown.x, selfShown.y) ? 1 : 0, em: selfSnap.em, dash: selfSnap.d, brawler: myBrawler(), name: 'You', isMe: true,
+      team: selfSnap.t, gems: selfSnap.g, stars: selfSnap.st,
     });
   }
 
@@ -483,8 +555,8 @@ function buildView(now) {
   while (net.events.length && net.events[0].at <= rt) handleEvent(net.events.shift(), now);
 
   return {
-    players, ghosts, projs, cubes: b.cubes, crates: b.crates, haunts: b.haunts,
-    poison: lerp(a.poison, b.poison, k), latest, me: net.me, cam: net.cam,
+    players, ghosts, projs, cubes: b.cubes, crates: b.crates, haunts: b.haunts, gems: b.gems ?? [],
+    poison: lerp(a.poison, b.poison, k), latest, me: net.me, cam: net.cam, mode: latest.mode ?? 'showdown',
   };
 }
 
@@ -499,7 +571,7 @@ function handleEvent(e, now) {
     case 'shot': if (vol > 0) sfx.shot(e.w, vol); break;
     case 'boom': if (vol > 0) { sfx.boom(e.big, vol); renderer.shake((e.big ? 16 : 8) * vol); } break;
     case 'ko': sfx.ko(Math.max(vol, 0.3)); onKnockout(e); break;
-    case 'cube': if (e.id === app.myId) sfx.cube(); break;
+    case 'cube': case 'gem': if (e.id === app.myId) sfx.cube(); break;
     case 'crate': if (vol > 0) sfx.crate(vol); break;
     case 'crateBreak': if (vol > 0) sfx.crateBreak(vol); break;
     case 'super': if (vol > 0) { sfx.super(vol); renderer.shake(6 * vol); } break;
@@ -509,7 +581,8 @@ function handleEvent(e, now) {
 
 function onKnockout(e) {
   const feed = document.createElement('div');
-  feed.textContent = !e.by ? `${nameOf(e.id)} fell to the poison`
+  feed.textContent = e.bounty && e.by ? `${nameOf(e.by)} took ${e.bounty}⭐ from ${nameOf(e.id)}`
+    : !e.by ? `${nameOf(e.id)} fell to the poison`
     : e.haunt ? `👻 ${nameOf(e.by)} haunted out ${nameOf(e.id)}`
       : `${nameOf(e.by)} knocked out ${nameOf(e.id)}`;
   $('killFeed').append(feed);
@@ -576,12 +649,28 @@ function frame(now) {
 
 function updateHud(view, me, meGhost, target, now) {
   const snap = view.latest;
-  $('aliveCount').textContent = `👥 ${snap.alive} left`;
-  const untilPoison = Math.ceil(POISON.start - snap.mt);
-  const outside = me && Math.hypot(me.x - CENTER, me.y - CENTER) > view.poison;
-  const poison = $('poisonInfo');
-  poison.classList.toggle('danger', !!outside);
-  poison.textContent = outside ? '☠ Get out of the poison!' : untilPoison > 0 ? `☠ Poison in ${untilPoison}s` : '☠ Poison closing in';
+  const clock = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  const left = $('aliveCount'), right = $('poisonInfo');
+  right.classList.remove('danger');
+  if (view.mode === 'gemgrab') {
+    const [blue, red] = snap.tg ?? [0, 0];
+    const mine = net.me.team ?? 0;
+    left.textContent = `💎 Blue${mine === 0 ? ' (you)' : ''} ${blue} · ${red} Red${mine === 1 ? ' (you)' : ''}`;
+    right.textContent = snap.gcd ? `${snap.gcd.team === mine ? '🏆 Your team' : '⚠ Enemy'} wins in ${snap.gcd.left}` : `⏱ ${clock(snap.left ?? 0)}`;
+    right.classList.toggle('danger', Boolean(snap.gcd && snap.gcd.team !== mine));
+  } else if (view.mode === 'bounty') {
+    const scores = snap.scores ?? [];
+    const best = scores.reduce((a, s) => (s[1] > (a?.[1] ?? -1) ? s : a), null);
+    const mineScore = scores.find((s) => s[0] === app.myId)?.[1] ?? 0;
+    left.textContent = `⭐ You ${mineScore}${best && best[0] !== app.myId ? ` · ${nameOf(best[0])} ${best[1]}` : ' · leading!'}`;
+    right.textContent = `⏱ ${clock(snap.left ?? 0)}`;
+  } else {
+    left.textContent = `👥 ${snap.alive} left`;
+    const untilPoison = Math.ceil(POISON.start - snap.mt);
+    const outside = me && Math.hypot(me.x - CENTER, me.y - CENTER) > view.poison;
+    right.classList.toggle('danger', !!outside);
+    right.textContent = outside ? '☠ Get out of the poison!' : untilPoison > 0 ? `☠ Poison in ${untilPoison}s` : '☠ Poison closing in';
+  }
 
   let center = '';
   if (snap.state === 'countdown') {
@@ -599,6 +688,8 @@ function updateHud(view, me, meGhost, target, now) {
     const ready = net.me.hcd <= 0;
     const how = input.touchMode ? 'Tap right side' : 'Click or Space';
     spec = `👻 You're a ghost! ${how} to haunt survivors · ${ready ? 'READY' : `${Math.ceil(net.me.hcd)}s`}`;
+  } else if (!me && app.room?.state === 'playing' && MODES[view.mode]?.respawn && net.me.respawn > 0) {
+    spec = `Knocked out${net.killedBy ? ` by ${nameOf(net.killedBy)}` : ''}. Respawning in ${net.me.respawn}…`;
   } else if (!me && app.room?.state === 'playing') {
     const inMatch = playerById(app.myId)?.inMatch;
     spec = !inMatch
@@ -680,6 +771,7 @@ EMOTES.forEach((em, n) => {
 
 renderMute();
 buildCards();
+buildModeCards();
 loadArt().then((ok) => { if (ok) { buildCards(); renderLobby(); } });
 
 // Opened an invite link? Prefill the code. Refreshed mid-game? Rejoin the same seat.
