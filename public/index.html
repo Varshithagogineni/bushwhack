@@ -18,9 +18,21 @@
     <div class="panel">
       <img class="hero-art" src="/assets/hero.webp" alt="Brick, Vex and Boom ready to brawl" onerror="this.remove()">
       <h1 class="logo">Bush<span>whack</span></h1>
-      <p class="tagline">Battle royale for up to 6 friends. Last brawler standing wins.</p>
+      <p class="tagline">Island brawls for up to 6 friends. Showdown, Gem Grab and Bounty.</p>
 
-      <label class="field">
+      <div id="accountBar" class="account-bar">
+        <div id="guestBar" class="account-row">
+          <span>Playing as a guest. Sign in to earn 🏆 trophies and badges.</span>
+          <button id="signInBtn" class="btn small secondary">Sign in</button>
+        </div>
+        <div id="userBar" class="account-row hidden">
+          <span id="userChip" class="user-chip"></span>
+          <button id="profileBtn" class="btn small secondary">Profile &amp; badges</button>
+          <button id="signOutBtn" class="btn small ghost">Sign out</button>
+        </div>
+      </div>
+
+      <label id="nameField" class="field">
         <span>Your name</span>
         <input id="nameInput" maxlength="14" autocomplete="nickname" placeholder="e.g. Sam">
       </label>
@@ -96,6 +108,51 @@
     <button id="leaveBtn" class="btn ghost small leave">Leave room</button>
   </main>
 
+  <!-- Sign in / create account -->
+  <div id="authModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="panel modal-card">
+      <div class="tabs">
+        <button class="tab selected" data-tab="login" id="authTitle">Sign in</button>
+        <button class="tab" data-tab="signup">Create account</button>
+      </div>
+      <form id="authForm">
+        <label class="field"><span>Username</span><input id="authUser" maxlength="14" autocomplete="username" placeholder="3-14 letters or numbers"></label>
+        <label class="field"><span>Password</span><input id="authPass" type="password" maxlength="72" autocomplete="current-password" placeholder="at least 6 characters"></label>
+        <p id="authError" class="error hidden"></p>
+        <button id="authSubmit" class="btn primary big" type="submit">Sign in</button>
+      </form>
+      <p class="hint center">Accounts are optional: guests can always play. Signing in saves your trophies, wins and badges.</p>
+      <button id="authClose" class="btn ghost small modal-close">Not now</button>
+    </div>
+  </div>
+
+  <!-- Profile -->
+  <main id="profile" class="screen profile hidden">
+    <section class="panel profile-head">
+      <button id="profileBack" class="btn small ghost">← Back</button>
+      <div class="profile-title">
+        <h1 id="pName"></h1>
+        <div class="profile-trophies">🏆 <span id="pTrophies">0</span></div>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Stats</h2>
+      <div id="pStats" class="stat-grid"></div>
+    </section>
+    <section class="panel">
+      <h2>Brawlers</h2>
+      <div id="pBrawlers" class="brawler-stats"></div>
+    </section>
+    <section class="panel">
+      <h2>Badges <span id="pBadgeCount" class="muted"></span></h2>
+      <div id="pBadges" class="badges"></div>
+    </section>
+    <section class="panel">
+      <h2>Leaderboard</h2>
+      <ol id="leaderboard" class="leaderboard"></ol>
+    </section>
+  </main>
+
   <!-- Game -->
   <div id="game" class="hidden">
     <canvas id="canvas"></canvas>
@@ -118,6 +175,7 @@
       <div class="results-card">
         <h2 id="resultTitle"></h2>
         <p id="resultSub" class="muted"></p>
+        <div id="progress" class="progress hidden"></div>
         <ol id="resultList"></ol>
         <button id="againBtn" class="btn primary big">Back to lobby</button>
         <p id="againHint" class="hint center"></p>
