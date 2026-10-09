@@ -7,6 +7,8 @@ import { Input } from './input.js';
 import { Renderer, drawBrawler } from './render.js';
 import { art, loadArt, drawPortrait } from './assets.js';
 import { sfx, isMuted, setMuted } from './sfx.js';
+import { hostRoom, joinRoom } from './net/p2p.js';
+import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
 const INTERP_MS = 80; // render other players this far in the past so motion stays smooth
 const CLIENT_COOLDOWN = 0.45;
@@ -47,20 +49,21 @@ const net = {
 
 const account = { token: local.get('bw_auth'), profile: null };
 
-async function api(route, body) {
-  const res = await fetch(route, {
-    method: body ? 'POST' : 'GET',
-    headers: { 'Content-Type': 'application/json', ...(account.token ? { Authorization: `Bearer ${account.token}` } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
+// Accounts live in Supabase; the browser may only call the bw_* database functions.
+async function rpc(fn, args = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: 'POST',
+    headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify(args),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(data?.message || 'Something went wrong. Try again.');
   return data;
 }
 
 async function refreshAccount() {
   if (account.token) {
-    try { account.profile = (await api('/api/me')).profile; } catch { signOutLocally(); }
+    try { account.profile = await rpc('bw_me', { p_token: account.token }); } catch { signOutLocally(); }
   }
   renderAccount();
 }
@@ -97,7 +100,7 @@ async function openProfile() {
   await refreshAccount();
   renderProfile(account.profile);
   showScreen('profile');
-  try { renderLeaderboard((await api('/api/leaderboard')).top); } catch { /* offline: skip */ }
+  try { renderLeaderboard(await rpc('bw_leaderboard')); } catch { /* offline: skip */ }
 }
 
 function tile(label, value) {
@@ -205,35 +208,95 @@ input.onEmote = (n) => sendEmote(n);
 
 // ---------- networking ----------
 
-function connect() {
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
-  app.ws = ws;
-  ws.onopen = () => {
-    app.retry = 0;
-    $('net').classList.add('hidden');
-    if (app.code) send({ t: 'join', code: app.code, name: myName(), token: app.token, auth: account.token });
-    else if (app.pending) send(app.pending);
-    app.pending = null;
-  };
-  ws.onmessage = (e) => {
+let hosting = null; // our hosted room, when we created it
+let connecting = false;
+let leaving = false;
+
+function showNet(text) {
+  $('net').textContent = text;
+  $('net').classList.toggle('hidden', !text);
+}
+
+function attach(conn, kind, code) {
+  app.ws = conn;
+  conn.onmessage = (e) => {
     let m;
     try { m = JSON.parse(e.data); } catch { return; }
     onMessage(m);
   };
-  ws.onclose = () => {
-    if (app.ws !== ws) return;
-    if (app.code) $('net').classList.remove('hidden');
-    setTimeout(connect, Math.min(4000, 400 * 2 ** app.retry++));
+  conn.onclose = () => {
+    if (app.ws !== conn) return;
+    app.ws = null;
+    onConnectionLost();
   };
+  const signedIn = account.profile ? { username: account.profile.username, trophies: account.profile.trophies } : null;
+  conn.send(JSON.stringify({ t: kind, code, name: myName(), token: app.token, account: signedIn }));
+}
+
+// Create = host the room in this browser; join = connect straight to the host's browser.
+async function enterRoom(kind, code) {
+  if (connecting) return;
+  connecting = true;
+  showNet(kind === 'create' ? 'Creating your room…' : 'Joining room…');
+  try {
+    if (kind === 'create') {
+      hosting = await hostRoom();
+      attach(hosting.conn, 'create', hosting.code);
+    } else {
+      attach(await joinRoom(code), 'join', code);
+    }
+    showNet('');
+  } catch (e) {
+    showNet('');
+    toast(e.message);
+    if (e.fatal) { app.code = null; session.del('bw_room'); showScreen('home'); }
+  } finally {
+    connecting = false;
+  }
+}
+
+function backHome(msg) {
+  app.code = null;
+  app.room = null;
+  session.del('bw_room');
+  showNet('');
+  if (msg) toast(msg);
+  history.replaceState(null, '', location.pathname);
+  showScreen('home');
+}
+
+// A joined player lost the host: try to get back into the same seat, then give up gracefully.
+async function onConnectionLost() {
+  if (leaving || !app.code || hosting) return;
+  showNet('Reconnecting…');
+  for (let tries = 0; tries < 3 && app.code; tries++) {
+    try {
+      attach(await joinRoom(app.code), 'join', app.code);
+      showNet('');
+      return;
+    } catch (e) {
+      if (e.fatal) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  backHome('The host closed the room.');
 }
 
 function send(m) {
   if (app.ws?.readyState === 1) app.ws.send(JSON.stringify(m));
 }
 
-function request(m) {
-  if (app.ws?.readyState === 1) send(m);
-  else app.pending = m;
+async function recordMatch(match) {
+  if (!account.token) return;
+  try {
+    const pr = await rpc('bw_record_match', { p_token: account.token, m: match });
+    app.progress = { ...pr, newBadges: pr.newBadges.map((b) => BADGES.find((x) => x.id === b.id)).filter(Boolean) };
+    if (account.profile) { account.profile.trophies = pr.trophies; renderAccount(); }
+    renderProgress();
+    if (app.progress.newBadges.length) sfx.superReady();
+  } catch (e) {
+    console.warn('Could not save match', e.message);
+  }
 }
 
 function onMessage(m) {
@@ -252,23 +315,15 @@ function onMessage(m) {
     case 'snap':
       onSnap(m);
       break;
-    case 'progress':
-      app.progress = m;
-      if (account.profile) { account.profile.trophies = m.trophies; renderAccount(); }
-      renderProgress();
-      for (const b of m.newBadges) sfx.superReady();
+    case 'record':
+      recordMatch(m.match);
       break;
     case 'pong':
       net.rtt = net.rtt == null ? performance.now() - m.ts : net.rtt * 0.8 + (performance.now() - m.ts) * 0.2;
       break;
     case 'error':
       toast(m.msg);
-      if (m.fatal) {
-        app.code = null;
-        session.del('bw_room');
-        $('net').classList.add('hidden');
-        showScreen('home');
-      }
+      if (m.fatal) backHome();
       break;
   }
 }
@@ -933,22 +988,25 @@ function renderMute() {
 $('nameInput').value = local.get('bw_name') || '';
 $('createBtn').addEventListener('click', () => {
   saveName();
-  request({ t: 'create', name: myName(), token: app.token, auth: account.token });
+  enterRoom('create');
 });
 $('joinForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const code = $('codeInput').value.trim().toUpperCase();
   if (code.length !== 4) return toast('Room codes are 4 letters.');
   saveName();
-  request({ t: 'join', code, name: myName(), token: app.token, auth: account.token });
+  enterRoom('join', code);
 });
 $('codeInput').addEventListener('input', (e) => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); });
 $('addBotBtn').addEventListener('click', () => send({ t: 'addBot' }));
 $('removeBotBtn').addEventListener('click', () => send({ t: 'removeBot' }));
 $('startBtn').addEventListener('click', () => send({ t: 'start' }));
 $('againBtn').addEventListener('click', () => send({ t: 'lobby' }));
-$('leaveBtn').addEventListener('click', () => {
+$('leaveBtn').addEventListener('click', async () => {
+  leaving = true;
   send({ t: 'leave' });
+  app.ws?.close?.();
+  if (hosting) await hosting.close();
   session.del('bw_room');
   location.href = location.pathname;
 });
@@ -982,7 +1040,7 @@ $('authForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('authSubmit').disabled = true;
   try {
-    const res = await api(`/api/${authMode}`, { username: $('authUser').value, password: $('authPass').value });
+    const res = await rpc(authMode === 'login' ? 'bw_login' : 'bw_signup', { p_username: $('authUser').value, p_password: $('authPass').value });
     account.token = res.token;
     account.profile = res.profile;
     local.set('bw_auth', res.token);
@@ -998,7 +1056,7 @@ $('authForm').addEventListener('submit', async (e) => {
   }
 });
 $('signOutBtn').addEventListener('click', async () => {
-  try { await api('/api/logout', {}); } catch { /* already signed out */ }
+  try { await rpc('bw_logout', { p_token: account.token }); } catch { /* already signed out */ }
   signOutLocally();
   renderAccount();
   toast('Signed out. You can keep playing as a guest.');
@@ -1017,9 +1075,8 @@ const params = new URLSearchParams(location.search);
 const linkCode = (params.get('room') || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 4);
 if (linkCode) {
   $('codeInput').value = linkCode;
-  if (session.get('bw_room') === linkCode && app.token) app.code = linkCode;
+  if (session.get('bw_room') === linkCode && app.token) { app.code = linkCode; enterRoom('join', linkCode); }
   else setTimeout(() => ($('nameInput').value ? $('codeInput') : $('nameInput')).focus(), 50);
 }
 showScreen('home');
-connect();
 requestAnimationFrame(frame);

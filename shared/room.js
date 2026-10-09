@@ -4,7 +4,7 @@ import {
   COUNTDOWN, POISON, HAUNT, EMOTES, BRAWLERS, BRAWLER_IDS, MODES, RESPAWN_TIME, GEM, clamp, isWallAt, inBush,
   resolveWalls, resolveCircles, movePlayer, moveGhost, speedFactor, hasLineOfSight, poisonRadius, nearestFloor,
   spawnPoints, teamSpawn, teamBase, crateSpots, round2,
-} from '../shared/game.js';
+} from './game.js';
 
 const RECONNECT_GRACE_MS = 30_000;
 const RESULTS_MS = 15_000;
