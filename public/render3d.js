@@ -60,8 +60,18 @@ export class Renderer3D extends Renderer {
     this.zoneObjs = new Map();
     this.gadgetPops = new Map(); // player id -> { at, g }: gadget icon over their head
     this.padObjs = [];
+    this.koBodies = new Map(); // player id -> knocked-out body still tumbling (don't redraw them)
+    this.kick = new THREE.Vector2(); // camera shake as a damped spring (world units)
+    this.kickV = new THREE.Vector2();
+    this.coarse = matchMedia('(pointer: coarse)').matches;
     this.camTarget = new THREE.Vector3(CENTER * U, 0, CENTER * U);
     this.uniforms = { time: { value: 0 } };
+    this.tmpM = new THREE.Matrix4();
+    this.tmpV = new THREE.Vector3();
+    this.tmpS = new THREE.Vector3();
+    this.tmpQ = new THREE.Quaternion();
+    this.tmpColor = new THREE.Color();
+    this.up = new THREE.Vector3(0, 1, 0);
     this.setupLights();
   }
 
@@ -100,6 +110,14 @@ export class Renderer3D extends Renderer {
     this.sun = sun;
     this.sunOffset = new THREE.Vector3(-15, 12, 8); // low golden-hour sun from the front-left: long shadows
     this.scene.add(sun, sun.target);
+    this.boomLights = [];
+    if (!matchMedia('(pointer: coarse)').matches) {
+      for (let i = 0; i < 2; i++) {
+        const l = new THREE.PointLight('#ffb060', 0, 7, 2);
+        this.scene.add(l);
+        this.boomLights.push({ light: l, born: -1, peak: 0 });
+      }
+    }
   }
 
   // ------------------------------------------------------------ loading
@@ -128,13 +146,16 @@ export class Renderer3D extends Renderer {
     this.buildDecor(albedo.image);
     this.buildGemMine();
     this.buildPads();
+    this.buildPuffs();
+    this.buildScorch();
+    this.buildPollen();
     this.setupPost();
     this.resize();
     this.ready = true;
   }
 
   setupPost() {
-    const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: this.coarse ? 2 : 4 });
     this.composer = new EffectComposer(this.gl, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     const tilt = (dir) => new ShaderPass({
@@ -187,11 +208,17 @@ export class Renderer3D extends Renderer {
     if (!this.frameTimes || this.lowPower) return;
     this.frameTimes.push(dt);
     if (this.frameTimes.length < 150) return;
-    const avg = this.frameTimes.slice(30).reduce((a, b) => a + b, 0) / (this.frameTimes.length - 30);
+    const sorted = this.frameTimes.slice(30).sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
     this.frameTimes = null;
-    if (avg > 1 / 45) {
+    if (median > 1 / 45) {
       this.lowPower = true;
+      this.composer?.renderTarget1?.dispose();
+      this.composer?.renderTarget2?.dispose();
       this.composer = null;
+      for (const b of this.boomLights) this.scene.remove(b.light);
+      this.boomLights = [];
+      if (this.pollen) this.pollen.visible = false;
       this.sun.shadow.mapSize.set(1024, 1024);
       this.sun.shadow.map?.dispose();
       this.sun.shadow.map = null;
@@ -262,7 +289,7 @@ export class Renderer3D extends Renderer {
     const g = this.ground;
     const geo = new THREE.PlaneGeometry(g.size, g.size);
     geo.rotateX(-Math.PI / 2);
-    const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: albedo, roughness: 0.95, metalness: 0 }));
+    const mesh = new THREE.Mesh(geo, this.decorate(new THREE.MeshStandardMaterial({ map: albedo, roughness: 0.95, metalness: 0 }), { key: 'ground' }));
     mesh.position.set(g.min + g.size / 2, 0, g.min + g.size / 2);
     mesh.receiveShadow = true;
     this.scene.add(mesh);
@@ -402,20 +429,115 @@ export class Renderer3D extends Renderer {
     this.scene.add(gas);
   }
 
+  // Soft cloud shadows drift over the island (one texture fetch per pixel).
+  cloudTexture() {
+    if (this.cloudTex) return this.cloudTex;
+    const S = 128, c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    const img = g.createImageData(S, S);
+    const rnd = rand(77);
+    const grid = (n) => Array.from({ length: n * n }, () => rnd());
+    const octs = [[4, grid(4), 0.55], [8, grid(8), 0.3], [16, grid(16), 0.15]];
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      let v = 0;
+      for (const [n, gr, w] of octs) {
+        const fx = x / S * n, fy = y / S * n, ix = Math.floor(fx), iy = Math.floor(fy), tx = fx - ix, ty = fy - iy;
+        const at = (i, j) => gr[((j % n + n) % n) * n + ((i % n + n) % n)];
+        const sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+        v += w * ((at(ix, iy) * (1 - sx) + at(ix + 1, iy) * sx) * (1 - sy) + (at(ix, iy + 1) * (1 - sx) + at(ix + 1, iy + 1) * sx) * sy);
+      }
+      const k = (y * S + x) * 4;
+      img.data[k] = img.data[k + 1] = img.data[k + 2] = Math.round(v * 255);
+      img.data[k + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    this.cloudTex = new THREE.CanvasTexture(c);
+    this.cloudTex.wrapS = this.cloudTex.wrapT = THREE.RepeatWrapping;
+    return this.cloudTex;
+  }
+
+  // Adds cloud shadows and (optionally) wind sway to a material. sway = { amp, height, rustle }.
+  decorate(mat, { sway = null, clouds = true, key = '' } = {}) {
+    const cloudTex = this.cloudTexture();
+    const time = this.uniforms.time;
+    mat.customProgramCacheKey = () => `deco:${key}:${sway ? `${sway.amp}/${sway.height}/${sway.rustle ? 1 : 0}` : ''}:${clouds ? 1 : 0}`;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.time = time;
+      shader.uniforms.cloudTex = { value: cloudTex };
+      let vs = shader.vertexShader.replace('#include <common>', `#include <common>
+        uniform float time;
+        varying vec3 vDecoW;
+        ${sway?.rustle ? '#ifdef USE_INSTANCING\nattribute float rustle;\n#endif' : ''}`);
+      vs = vs.replace('#include <project_vertex>', `
+        vec4 mvPosition = vec4(transformed, 1.0);
+        #ifdef USE_INSTANCING
+          mvPosition = instanceMatrix * mvPosition;
+        #endif
+        vec4 decoW = modelMatrix * mvPosition;
+        ${sway ? `
+        {
+          #ifdef USE_INSTANCING
+            vec2 ip = floor(instanceMatrix[3].xz);
+          #else
+            vec2 ip = floor(modelMatrix[3].xz);
+          #endif
+          float h = clamp((decoW.y - (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).y) / ${sway.height.toFixed(2)}, 0.0, 1.0);
+          h *= h;
+          vec2 wind = vec2(sin(time * 1.6 + ip.x * 0.9 + ip.y * 0.4), cos(time * 1.1 + ip.y * 0.7) * 0.6) * ${sway.amp.toFixed(3)};
+          ${sway.rustle ? `
+          #ifdef USE_INSTANCING
+            wind += vec2(sin(time * 26.0 + decoW.y * 7.0), cos(time * 23.0 + decoW.x * 5.0)) * 0.07 * rustle;
+          #endif` : ''}
+          decoW.xz += wind * h;
+        }` : ''}
+        vDecoW = decoW.xyz;
+        mvPosition = viewMatrix * decoW;
+        gl_Position = projectionMatrix * mvPosition;`);
+      shader.vertexShader = vs;
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nuniform float time;\nuniform sampler2D cloudTex;\nvarying vec3 vDecoW;')
+        .replace('#include <map_fragment>', `#include <map_fragment>
+          ${clouds ? `{
+            float cl = smoothstep(0.42, 0.72, texture2D(cloudTex, vDecoW.xz * 0.035 + time * vec2(0.012, 0.007)).r);
+            diffuseColor.rgb *= mix(1.0, 0.8, cl);
+          }` : ''}`);
+    };
+    mat.needsUpdate = true;
+    return mat;
+  }
+
   // Walls and bushes never move: draw each variant as one instanced mesh.
-  instanced(name, transforms, { cast = true } = {}) {
+  // `sway` makes foliage move in the wind; `rustle` is a per-instance shake array (bushes).
+  instanced(name, transforms, { cast = true, sway = null, rustle = null, clouds = false } = {}) {
     const group = new THREE.Group();
     const src = this.models[name];
     src.updateMatrixWorld(true);
+    const rustleAttr = rustle ? new THREE.InstancedBufferAttribute(rustle, 1) : null;
+    if (rustleAttr) rustleAttr.setUsage(THREE.DynamicDrawUsage);
+    this.decoMats ??= new Map();
     src.traverse((o) => {
       if (!o.isMesh) return;
-      const im = new THREE.InstancedMesh(o.geometry, o.material, transforms.length);
+      let material = o.material, geometry = o.geometry;
+      if (sway || clouds) {
+        const k = `${name}|${material.uuid}`;
+        if (!this.decoMats.has(k)) {
+          // Foliage outlines need their own copy so they sway with the leaves (characters share outlineMat).
+          const m = material.clone();
+          this.decorate(m, { sway: sway && { ...sway, rustle: Boolean(rustle) }, clouds: clouds && material !== this.outlineMat, key: name });
+          this.decoMats.set(k, m);
+        }
+        material = this.decoMats.get(k);
+      }
+      if (rustleAttr) { geometry = geometry.clone(); geometry.setAttribute('rustle', rustleAttr); }
+      const im = new THREE.InstancedMesh(geometry, material, transforms.length);
       const local = o.matrixWorld.clone();
       transforms.forEach((m, i) => im.setMatrixAt(i, new THREE.Matrix4().multiplyMatrices(m, local)));
       im.castShadow = cast && o.material !== this.outlineMat;
       im.receiveShadow = true;
       group.add(im);
     });
+    group.userData.rustle = rustleAttr;
     this.scene.add(group);
     return group;
   }
@@ -435,8 +557,11 @@ export class Renderer3D extends Renderer {
         bushes[v].push(m);
       }
     }));
-    walls.forEach((list, v) => list.length && this.instanced(`wall${v}`, list));
-    this.bushGroups = bushes.map((list, v) => (list.length ? this.instanced(`bush${v}`, list) : null));
+    walls.forEach((list, v) => list.length && this.instanced(`wall${v}`, list, { clouds: true }));
+    this.bushRustle = bushes.map((list) => new Float32Array(Math.max(1, list.length)));
+    this.bushGroups = bushes.map((list, v) => (list.length
+      ? this.instanced(`bush${v}`, list, { sway: { amp: 0.035, height: 0.9 }, rustle: this.bushRustle[v], clouds: true }) : null));
+    this.bushByTile = new Map(this.bushTiles.map((b) => [`${b.r},${b.c}`, b]));
     // A see-through copy for the bush you're standing in.
     this.myBush = new THREE.Group();
     this.scene.add(this.myBush);
@@ -463,6 +588,7 @@ export class Renderer3D extends Renderer {
       return ch === '.';
     };
     const isGrass = (x, z) => { const [r, gg, b] = at(x, z); return gg > r * 1.15 && gg > b * 1.4; };
+    this.groundAt = at;
 
     // Grass tufts that sway in the wind.
     const tuft = this.makeTuft();
@@ -514,7 +640,7 @@ export class Renderer3D extends Renderer {
     for (const v of [0, 1]) {
       this.instanced(`palm${v}`, palms.filter((_, i) => i % 2 === v).map(([x, z]) => new THREE.Matrix4().compose(
         new THREE.Vector3(x, 0, z), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.atan2(-(z - C), x - C) + (rnd() - 0.5) * 0.6),
-        new THREE.Vector3().setScalar(0.85 + rnd() * 0.3))));
+        new THREE.Vector3().setScalar(0.85 + rnd() * 0.3))), { sway: { amp: 0.09, height: 3.0 }, clouds: true });
     }
     for (let v = 0; v < 3; v++) {
       place(`rock${v}`, ring(1.6 + v * 0.4, 9, 3), 1.3);
@@ -534,6 +660,147 @@ export class Renderer3D extends Renderer {
       const out = Math.atan2(z - C, x - C);
       return { x, z, tx: -Math.sin(out), tz: Math.cos(out), yaw: -out + Math.PI / 2, ph: rnd() * 6.28, sp: 0.5 + rnd() * 0.6 };
     });
+  }
+
+  // One pooled, instanced particle system for dust, smoke, leaves and chips: 1 draw call.
+  softDisc() {
+    if (this.discTex) return this.discTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d');
+    const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grd.addColorStop(0, 'rgba(255,255,255,1)');
+    grd.addColorStop(0.5, 'rgba(255,255,255,0.6)');
+    grd.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, 64, 64);
+    this.discTex = new THREE.CanvasTexture(c);
+    return this.discTex;
+  }
+
+  // An instanced mesh whose instances each carry an alpha.
+  alphaPool(geo, mat, n) {
+    const alpha = new THREE.InstancedBufferAttribute(new Float32Array(n), 1);
+    alpha.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('alpha', alpha);
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nattribute float alpha;\nvarying float vAlpha;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvAlpha = alpha;');
+      shader.fragmentShader = shader.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vAlpha;')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vAlpha;');
+    };
+    mat.customProgramCacheKey = () => 'alphaPool';
+    const im = new THREE.InstancedMesh(geo, mat, n);
+    im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    im.frustumCulled = false;
+    const hide = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < n; i++) { im.setMatrixAt(i, hide); im.setColorAt(i, new THREE.Color('#ffffff')); }
+    this.scene.add(im);
+    return { im, alpha };
+  }
+
+  buildPuffs() {
+    const N = 160;
+    const { im, alpha } = this.alphaPool(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: this.softDisc(), transparent: true, depthWrite: false }), N);
+    im.renderOrder = 6;
+    this.puffs = { im, alpha, n: N, next: 0, live: 0, p: Array.from({ length: N }, () => ({ life: 0, age: 1 })) };
+  }
+
+  // Spawn one particle (world units). Recycles the oldest slot when the pool is full.
+  puff(x, y, z, o = {}) {
+    const P = this.puffs;
+    if (!P || (this.lowPower && P.live > 60)) return;
+    const q = P.p[P.next];
+    const i = P.next;
+    P.next = (P.next + 1) % P.n;
+    Object.assign(q, {
+      x, y, z, vx: o.vx ?? 0, vy: o.vy ?? 0, vz: o.vz ?? 0, age: 0, life: o.life ?? 0.5,
+      s0: o.size ?? 0.15, s1: o.size1 ?? (o.size ?? 0.15) * 2, a0: o.alpha ?? 0.5, g: o.gravity ?? 0, drag: o.drag ?? 0.92,
+      flutter: o.flutter ?? 0, floor: o.floor ?? 0.02, ph: Math.random() * 6.28,
+    });
+    P.im.setColorAt(i, this.tmpColor.set(o.color ?? '#ffffff'));
+    P.im.instanceColor.needsUpdate = true;
+  }
+
+  stepPuffs(dt) {
+    const P = this.puffs;
+    if (!P) return;
+    const m = this.tmpM, pos = this.tmpV, sc = this.tmpS, q = this.camera.quaternion;
+    let live = 0;
+    for (let i = 0; i < P.n; i++) {
+      const u = P.p[i];
+      if (u.age >= u.life) {
+        if (u.life) { P.alpha.array[i] = 0; P.im.setMatrixAt(i, m.makeScale(0, 0, 0)); u.life = 0; }
+        continue;
+      }
+      live++;
+      u.age += dt;
+      const k = Math.min(1, u.age / u.life);
+      const d = Math.pow(u.drag, dt * 60);
+      u.vx *= d; u.vz *= d; u.vy = u.vy * d - u.g * dt;
+      u.x += (u.vx + Math.sin(u.age * 9 + u.ph) * u.flutter) * dt;
+      u.y = Math.max(u.floor, u.y + u.vy * dt);
+      u.z += (u.vz + Math.cos(u.age * 7 + u.ph) * u.flutter * 0.6) * dt;
+      const size = u.s0 + (u.s1 - u.s0) * k;
+      P.im.setMatrixAt(i, m.compose(pos.set(u.x, u.y, u.z), q, sc.set(size, size, size)));
+      P.alpha.array[i] = u.a0 * (1 - k) * Math.min(1, u.age / 0.06);
+    }
+    P.live = live;
+    P.im.instanceMatrix.needsUpdate = true;
+    P.alpha.needsUpdate = true;
+  }
+
+  // Scorch marks from explosions, fading over 8 s.
+  buildScorch() {
+    // White soft disc tinted per instance (same recipe as the puffs, so colours come out right).
+    const { im, alpha } = this.alphaPool(new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ map: this.softDisc(), transparent: true, depthWrite: false }), 16);
+    const soot = new THREE.Color('#2a2018');
+    for (let i = 0; i < 16; i++) im.setColorAt(i, soot);
+    im.renderOrder = 1;
+    this.scorch = { im, alpha, next: 0, born: new Float32Array(16).fill(-1e9) };
+  }
+
+  addScorch(x, z, r, now) {
+    const S = this.scorch;
+    if (!S) return;
+    const i = S.next;
+    S.next = (S.next + 1) % 16;
+    S.born[i] = now;
+    S.im.setMatrixAt(i, this.tmpM.compose(this.tmpV.set(x, 0.045, z), this.tmpQ.setFromAxisAngle(this.up, Math.random() * 6.28), this.tmpS.set(r, 1, r)));
+    S.im.instanceMatrix.needsUpdate = true;
+  }
+
+  stepScorch(now) {
+    const S = this.scorch;
+    if (!S) return;
+    for (let i = 0; i < 16; i++) S.alpha.array[i] = Math.min(0.7, Math.max(0, 0.7 * (1 - (now - S.born[i]) / 8000)));
+    S.alpha.needsUpdate = true;
+  }
+
+  // Pollen and seeds drifting in the sunlight around the camera.
+  buildPollen() {
+    const n = 110, pos = new Float32Array(n * 3);
+    const rnd = rand(9);
+    this.pollenSeed = Array.from({ length: n }, () => ({ x: (rnd() - 0.5) * 18, y: 0.3 + rnd() * 2.2, z: (rnd() - 0.5) * 14, s: 0.2 + rnd() * 0.5, ph: rnd() * 6.28 }));
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    this.pollen = new THREE.Points(geo, new THREE.PointsMaterial({ map: this.softDisc(), color: '#fff6d0', size: 0.07, transparent: true, opacity: 0.75, depthWrite: false, blending: THREE.AdditiveBlending }));
+    this.pollen.frustumCulled = false;
+    this.scene.add(this.pollen);
+  }
+
+  stepPollen(t) {
+    if (!this.pollen?.visible) return;
+    const a = this.pollen.geometry.attributes.position.array, cx = this.camTarget.x, cz = this.camTarget.z;
+    const wrap = (v, span) => ((v % span) + span * 1.5) % span - span / 2;
+    this.pollenSeed.forEach((p, i) => {
+      a[i * 3] = cx + wrap(p.x + t * p.s * 0.6 - cx, 18) + Math.sin(t * 0.7 + p.ph) * 0.3;
+      a[i * 3 + 1] = p.y + Math.sin(t * 1.3 + p.ph) * 0.25;
+      a[i * 3 + 2] = cz + wrap(p.z + t * p.s * 0.25 - cz, 14);
+    });
+    this.pollen.geometry.attributes.position.needsUpdate = true;
   }
 
   dynamicInstanced(name, count) {
@@ -643,6 +910,7 @@ export class Renderer3D extends Renderer {
     if (!e) {
       const obj = this.models[p.brawler].clone(true);
       obj.scale.setScalar(CHAR_SCALE);
+      obj.rotation.order = 'ZXY'; // yaw first, then lean about world axes
       const mats = new Map();
       const piv = {};
       obj.traverse((o) => {
@@ -662,7 +930,7 @@ export class Renderer3D extends Renderer {
       const holder = new THREE.Group();
       holder.add(obj, ring, boost);
       this.scene.add(holder);
-      e = { obj: holder, model: obj, ring, boost, mats: [...mats.values()], piv, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
+      e = { obj: holder, model: obj, ring, boost, mats: [...mats.values()], piv, vel: new THREE.Vector2(), lean: new THREE.Vector2(), leanV: new THREE.Vector2(), sq: 0, sqv: 0, step: 0, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
       this.players.set(p.id, e);
     }
     e.seen = true;
@@ -679,8 +947,25 @@ export class Renderer3D extends Renderer {
     e.ring.material.color.set(this.colorOf(p));
     const x = p.x * U, z = p.y * U;
     const moved = e.last ? Math.hypot(x - e.last.x, z - e.last.z) : 0;
+    const vx = e.last && dt > 0 ? (x - e.last.x) / dt : 0, vz = e.last && dt > 0 ? (z - e.last.z) / dt : 0;
     e.last = { x, z };
     const speed = dt > 0 ? moved / dt : 0;
+    // Body lags behind changes of speed: spring-damped lean into acceleration (purely visual).
+    if (dt > 0 && dt < 0.1 && speed < 30) {
+      const ax = THREE.MathUtils.clamp((vx - e.vel.x) / dt, -40, 40), az = THREE.MathUtils.clamp((vz - e.vel.y) / dt, -40, 40);
+      let tx = ax * 0.02 + vx * 0.012, tz = az * 0.02 + vz * 0.012;
+      if (p.dash === 1) { tx += vx * 0.03; tz += vz * 0.03; }
+      const tl = Math.hypot(tx, tz);
+      if (tl > 0.25) { tx *= 0.25 / tl; tz *= 0.25 / tl; }
+      e.leanV.x += (140 * (tx - e.lean.x) - 14 * e.leanV.x) * dt;
+      e.leanV.y += (140 * (tz - e.lean.y) - 14 * e.leanV.y) * dt;
+      e.lean.x += e.leanV.x * dt;
+      e.lean.y += e.leanV.y * dt;
+      // Landing / launch squash spring.
+      e.sqv += (-260 * e.sq - 16 * e.sqv) * dt;
+      e.sq += e.sqv * dt;
+    }
+    e.vel.set(vx, vz);
     e.walk = THREE.MathUtils.lerp(e.walk ?? 0, speed > 0.5 ? 1 : 0, Math.min(1, dt * 10));
     e.phase += dt * 11 * e.walk;
     e.obj.position.set(x, 0, z);
@@ -693,9 +978,33 @@ export class Renderer3D extends Renderer {
     e.model.rotation.y = e.yaw + spin;
     const kv = Math.hypot(p.kx || 0, p.ky || 0);
     const lean = Math.min(1, kv / 1400) * 0.44;
-    e.model.rotation.x = kv ? lean * ((p.ky || 0) / kv) : 0;
-    e.model.rotation.z = kv ? -lean * ((p.kx || 0) / kv) : 0;
-    e.model.scale.set(CHAR_SCALE * (1 + 0.15 * flash), CHAR_SCALE * (1 - 0.15 * flash), CHAR_SCALE * (1 + 0.15 * flash));
+    e.model.rotation.x = (kv ? lean * ((p.ky || 0) / kv) : 0) + e.lean.y;
+    e.model.rotation.z = (kv ? -lean * ((p.kx || 0) / kv) : 0) - e.lean.x;
+    const sq = THREE.MathUtils.clamp(e.sq, -0.3, 0.4);
+    const sy = 1 - 0.15 * flash - 0.28 * sq, sxz = 1 + 0.15 * flash + 0.18 * sq;
+    e.model.scale.set(CHAR_SCALE * sxz, CHAR_SCALE * sy, CHAR_SCALE * sxz);
+    // Footsteps kick up dust (sand-coloured on paths, faint green-grey on grass).
+    const stepN = Math.floor(e.phase / Math.PI);
+    if (stepN !== e.step && e.walk > 0.5 && !p.fly) {
+      e.step = stepN;
+      const side = stepN % 2 ? 0.15 : -0.15, yaw = e.yaw;
+      const fx = x + Math.cos(yaw) * side, fz = z - Math.sin(yaw) * side;
+      const [r, gg] = this.groundAt ? this.groundAt(fx, fz) : [200, 180];
+      const sand = r > gg * 1.05;
+      this.puff(fx, 0.06, fz, { vx: -vx * 0.08 + (Math.random() - 0.5) * 0.4, vy: 0.5, vz: -vz * 0.08 + (Math.random() - 0.5) * 0.4, size: 0.14, size1: 0.32, life: 0.45, alpha: sand ? 0.45 : 0.28, color: sand ? '#d8c39a' : '#a9b27a', drag: 0.9 });
+    } else if (stepN !== e.step) e.step = stepN;
+    if (p.dash === 1 && now - (e.dustAt ?? 0) > 40) {
+      e.dustAt = now;
+      this.puff(x, 0.08, z, { vx: (Math.random() - 0.5) * 1.2, vy: 0.7, vz: (Math.random() - 0.5) * 1.2, size: 0.2, size1: 0.5, life: 0.55, alpha: 0.45, color: '#cdb892' });
+    }
+    // Pushing through a bush: it shakes and sheds a few leaves.
+    const bkey = p.bush ? `${Math.floor(p.y / TILE)},${Math.floor(p.x / TILE)}` : null;
+    if (bkey) {
+      const b = this.bushByTile?.get(bkey);
+      if (b && speed > 0.5) this.rustleBush(b, 1);
+      if (b && bkey !== e.bushKey) this.leafBurst(b.c + 0.5, b.r + 0.5, 6);
+    }
+    e.bushKey = bkey;
     const s = Math.sin(e.phase) * e.walk;
     if (e.piv.legL) e.piv.legL.rotation.x = 0.55 * s;
     if (e.piv.legR) e.piv.legR.rotation.x = -0.55 * s;
@@ -711,7 +1020,6 @@ export class Renderer3D extends Renderer {
     const lift = p.fly ? Math.sin(Math.PI * p.fly) * 2.2 : 0;
     const hop = this.champ === p.id ? Math.abs(Math.sin(now / 180)) * 0.45 : 0;
     e.model.position.y = lift + hop + (p.dash && !p.fly ? 0.08 : 0);
-    if (p.fly) e.model.rotation.x = -0.5 * Math.sin(Math.PI * p.fly);
     e.boost.visible = Boolean(p.boost);
     if (p.boost) e.boost.material.opacity = 0.65 + 0.35 * Math.sin(now / 90);
     // Super charge ring under your own feet.
@@ -731,6 +1039,95 @@ export class Renderer3D extends Renderer {
     }
   }
 
+  rustleBush(b, amount) {
+    const arr = this.bushRustle?.[b.v];
+    if (!arr) return;
+    arr[b.index] = Math.max(arr[b.index], amount);
+    this.rustling = true;
+  }
+
+  leafBurst(x, z, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, v = 0.6 + Math.random() * 0.9;
+      this.puff(x + Math.cos(a) * 0.2, 0.7 + Math.random() * 0.2, z + Math.sin(a) * 0.2, {
+        vx: Math.cos(a) * v, vy: 1.2 + Math.random(), vz: Math.sin(a) * v, gravity: 4, drag: 0.97, flutter: 0.5,
+        size: 0.09, size1: 0.07, life: 0.9, alpha: 0.95, color: Math.random() < 0.5 ? '#3f8f3a' : '#6fbf4a',
+      });
+    }
+  }
+
+  // Camera shake as a damped spring pushed away from the source (world game coords), not white noise.
+  shake(amount, fromX = null, fromY = null) {
+    let dx = Math.random() - 0.5, dz = Math.random() - 0.5;
+    if (fromX != null) { dx = this.camTarget.x - fromX * U; dz = this.camTarget.z - fromY * U; }
+    const d = Math.hypot(dx, dz) || 1;
+    this.kickV.x += (dx / d) * amount * 0.12;
+    this.kickV.y += (dz / d) * amount * 0.12;
+  }
+
+  flashLight(x, z, big, now) {
+    const b = this.boomLights.reduce((o, l) => (!o || l.born < o.born ? l : o), null);
+    if (!b) return;
+    b.born = now;
+    b.peak = big ? 110 : 60;
+    b.light.position.set(x, 0.8, z);
+  }
+
+  disposeObj(obj) {
+    obj.traverse((o) => {
+      if (!o.isMesh) return;
+      if (!o.geometry.userData.shared) o.geometry.dispose();
+      if (!o.material.userData?.shared) o.material.dispose?.();
+    });
+  }
+
+  // Knocked out: the body is flung along the killing blow, tumbles, bounces once, then poofs.
+  tumble(e, ev, now) {
+    const ent = this.players.get(ev.id);
+    if (!ent) return;
+    this.players.delete(ev.id);
+    this.koBodies.set(ev.id, now + 1100);
+    ent.ring.visible = false;
+    ent.boost.visible = false;
+    if (ent.superRing) ent.superRing.visible = false;
+    for (const m of ent.mats) { m.opacity = 1; m.transparent = false; m.emissive?.setScalar(0); }
+    const pos = ent.obj.position.clone();
+    const killer = ev.by ? (this.players.get(ev.by)?.obj.position ?? null) : null;
+    let dx = killer ? pos.x - killer.x : Math.random() - 0.5, dz = killer ? pos.z - killer.z : Math.random() - 0.5;
+    const d = Math.hypot(dx, dz) || 1;
+    dx /= d; dz /= d;
+    const vel = new THREE.Vector3(dx * 4.5, 5.5, dz * 4.5);
+    const axis = new THREE.Vector3(dz, 0, -dx).normalize();
+    let spin = 9, bounces = 0, last = 0, poofed = false;
+    const body = ent.model;
+    this.scene.remove(ent.obj);
+    const holder = new THREE.Group();
+    holder.position.copy(pos);
+    holder.add(body);
+    body.position.set(0, 0, 0);
+    this.fx.push({ obj: holder, born: now, life: 1.1, keep: true, update: (k) => {
+      const t = k * 1.1, dt = Math.max(0, t - last);
+      last = t;
+      vel.y -= 16 * dt;
+      holder.position.addScaledVector(vel, dt);
+      if (holder.position.y < 0) {
+        holder.position.y = 0;
+        if (bounces++ === 0) { vel.y = -vel.y * 0.35; vel.x *= 0.6; vel.z *= 0.6; spin *= 0.5; } else { vel.set(0, 0, 0); spin = 0; }
+        this.puff(holder.position.x, 0.08, holder.position.z, { vy: 0.6, size: 0.3, size1: 0.7, life: 0.5, alpha: 0.5, color: '#d8c39a' });
+      }
+      holder.rotateOnWorldAxis(axis, spin * dt);
+      if (k > 0.8) holder.scale.setScalar(Math.max(0.001, (1 - k) / 0.2));
+      if (k > 0.8 && !poofed) {
+        poofed = true;
+        for (let i = 0; i < 10; i++) {
+          const a = Math.random() * 6.28;
+          this.puff(holder.position.x, holder.position.y + 0.4, holder.position.z, { vx: Math.cos(a) * 1.5, vy: 1 + Math.random(), vz: Math.sin(a) * 1.5, size: 0.25, size1: 0.6, life: 0.6, alpha: 0.8, color: '#ffffff' });
+        }
+      }
+    } });
+    this.scene.add(holder);
+  }
+
   syncMap(map, items, make, update) {
     for (const v of map.values()) v.seen = false;
     for (const it of items) {
@@ -740,7 +1137,7 @@ export class Renderer3D extends Renderer {
       update(o, it);
     }
     for (const [k, o] of map) {
-      if (!o.seen) { this.scene.remove(o.obj); map.delete(k); }
+      if (!o.seen) { this.scene.remove(o.obj); if (o.disposable) this.disposeObj(o.obj); map.delete(k); }
     }
   }
 
@@ -760,7 +1157,14 @@ export class Renderer3D extends Renderer {
     const burst = (n, color, speed, size, upward, life, plank = false) => {
       const g = new THREE.Group();
       const mat = new THREE.MeshStandardMaterial({ color, transparent: true, roughness: 0.8 });
-      const geo = plank ? new THREE.BoxGeometry(size * 2.6, size * 0.6, size) : new THREE.IcosahedronGeometry(size, 0);
+      this.burstGeos ??= new Map();
+      const gk = `${plank}:${size}`;
+      if (!this.burstGeos.has(gk)) {
+        const ng = plank ? new THREE.BoxGeometry(size * 2.6, size * 0.6, size) : new THREE.IcosahedronGeometry(size, 0);
+        ng.userData.shared = true;
+        this.burstGeos.set(gk, ng);
+      }
+      const geo = this.burstGeos.get(gk);
       const parts = Array.from({ length: n }, () => {
         const m = new THREE.Mesh(geo, mat);
         const a = Math.random() * Math.PI * 2;
@@ -789,6 +1193,30 @@ export class Renderer3D extends Renderer {
         mat.opacity = Math.min(1, (1 - k) * 2.5);
       });
     };
+    if (e.k === 'shot') {
+      // Muzzle flash + a little smoke from the barrel (lobs and punches get none).
+      const kind = { shotgun: 'p', bullet: 'b' }[e.w];
+      const ent = this.players.get(e.id);
+      if (!kind || !ent) return;
+      const a = e.a ?? (Math.PI / 2 - ent.yaw), c = Math.cos(a), sn = Math.sin(a);
+      const fx = ent.obj.position.x + c * 0.55, fz = ent.obj.position.z + sn * 0.55;
+      const flash = new THREE.Sprite(this.glowMat(kind));
+      flash.position.set(fx, 0.75, fz);
+      add(flash, 0.08, (k) => flash.scale.setScalar(1.1 - 0.7 * k));
+      for (let i = 0; i < 2; i++) this.puff(fx, 0.75, fz, { vx: c * 0.8 + (Math.random() - 0.5) * 0.4, vy: 0.6, vz: sn * 0.8 + (Math.random() - 0.5) * 0.4, size: 0.18, size1: 0.42, life: 0.5, alpha: 0.35, color: '#d9d4c8' });
+      return;
+    }
+    if (e.k === 'boom' || e.k === 'meteor') {
+      this.addScorch(at.x, at.z, e.r * U * 0.8, now);
+      this.flashLight(at.x, at.z, e.big || e.k === 'meteor', now);
+      if (tileAt(e.x, e.y) === 'w') this.splash(e.x, e.y, now);
+      for (let i = 0; i < (e.big || e.k === 'meteor' ? 10 : 6); i++) {
+        const a = Math.random() * 6.28, v = 1 + Math.random() * 1.5;
+        this.puff(at.x + Math.cos(a) * 0.2, 0.2, at.z + Math.sin(a) * 0.2, { vx: Math.cos(a) * v, vy: 0.8 + Math.random(), vz: Math.sin(a) * v, size: 0.35, size1: 0.9, life: 0.9, alpha: 0.45, color: '#8a7d6c', drag: 0.9 });
+      }
+      // Nearby bushes get shaken by the blast.
+      for (const b of this.bushTiles ?? []) if (Math.hypot(b.c + 0.5 - at.x, b.r + 0.5 - at.z) < e.r * U + 1) this.rustleBush(b, 1);
+    }
     if (e.k === 'boom') {
       const r = e.r * U;
       const ball = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12), new THREE.MeshBasicMaterial({ color: '#ffb347', transparent: true }));
@@ -801,8 +1229,15 @@ export class Renderer3D extends Renderer {
       burst(e.big ? 18 : 10, '#5a4a3a', 3, 0.07, 3, 0.7);
     } else if (e.k === 'spark') {
       burst(5, '#fff3a8', 1.5, 0.04, 1.5, 0.25);
+      // Stone chips knocked off the wall.
+      for (let i = 0; i < 3; i++) {
+        const a = Math.random() * 6.28;
+        this.puff(at.x, 0.7, at.z, { vx: Math.cos(a) * 1.4, vy: 1.5, vz: Math.sin(a) * 1.4, gravity: 12, drag: 0.98, size: 0.06, size1: 0.05, life: 0.4, alpha: 0.95, color: '#7a7368' });
+      }
+      this.puff(at.x, 0.7, at.z, { vy: 0.3, size: 0.2, size1: 0.45, life: 0.4, alpha: 0.35, color: '#cfc6b4' });
     } else if (e.k === 'ko') {
-      burst(16, '#ffffff', 2.5, 0.09, 3, 0.8);
+      if (!e.left && this.players.has(e.id)) this.tumble(this.players.get(e.id), e, now);
+      else burst(16, '#ffffff', 2.5, 0.09, 3, 0.8);
     } else if (e.k === 'crateBreak') {
       burst(8, '#9a7046', 2.4, 0.09, 4.5, 1.2, true);
     } else if (e.k === 'crate') {
@@ -838,7 +1273,16 @@ export class Renderer3D extends Renderer {
       ring.position.copy(at).setY(0.07);
       const R = e.k === 'shroom' ? 1.4 : e.k === 'land' ? 0.8 : 1;
       add(ring, 0.5, (k) => { ring.scale.setScalar(R * (0.3 + k)); ring.material.opacity = 1 - k; });
-      if (e.k === 'land') burst(8, '#c9b38a', 1.8, 0.07, 1.6, 0.6);
+      if (e.k === 'land') {
+        burst(8, '#c9b38a', 1.8, 0.07, 1.6, 0.6);
+        const ent = this.players.get(e.id);
+        if (ent) ent.sqv += 9;
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * 6.28;
+          this.puff(at.x + Math.cos(a) * 0.3, 0.06, at.z + Math.sin(a) * 0.3, { vx: Math.cos(a) * 1.6, vy: 0.3, vz: Math.sin(a) * 1.6, size: 0.2, size1: 0.45, life: 0.5, alpha: 0.4, color: '#d8c39a', drag: 0.88 });
+        }
+      }
+      if (e.k === 'jump') { const ent = this.players.get(e.id); if (ent) ent.sqv -= 7; }
       if (e.k === 'drink') burst(10, '#ffb347', 2, 0.05, 3, 0.6);
       if (e.k === 'gadget') this.gadgetPops.set(e.id, { at: now, g: e.g });
     } else if (e.k === 'heal') {
@@ -985,14 +1429,16 @@ export class Renderer3D extends Renderer {
     const flashOf = (id) => { const at = this.flashes.get(id); return at ? Math.max(0, 1 - (now - at) / 140) : 0; };
 
     // Camera follows the view's camera point, high and tilted like a diorama.
-    this.shakeAmt *= 0.88;
-    this.camTarget.set(v.cam.x * U, 0, v.cam.y * U);
+    // Camera kick: a damped spring that translates camera and target together (aim stays exact).
+    if (dt > 0 && dt < 0.1) {
+      this.kickV.x += (-220 * this.kick.x - 20 * this.kickV.x) * dt;
+      this.kickV.y += (-220 * this.kick.y - 20 * this.kickV.y) * dt;
+      this.kick.x += this.kickV.x * dt;
+      this.kick.y += this.kickV.y * dt;
+    }
+    this.camTarget.set(v.cam.x * U + this.kick.x, 0, v.cam.y * U + this.kick.y);
     const pitch = THREE.MathUtils.degToRad(53);
-    this.camera.position.set(
-      this.camTarget.x + (Math.random() - 0.5) * this.shakeAmt * 0.02,
-      this.camDist * Math.sin(pitch),
-      this.camTarget.z + this.camDist * Math.cos(pitch) + (Math.random() - 0.5) * this.shakeAmt * 0.02,
-    );
+    this.camera.position.set(this.camTarget.x, this.camDist * Math.sin(pitch), this.camTarget.z + this.camDist * Math.cos(pitch));
     this.camera.lookAt(this.camTarget);
     // Sun and its shadow box follow the camera.
     this.sun.target.position.copy(this.camTarget);
@@ -1002,7 +1448,8 @@ export class Renderer3D extends Renderer {
 
     // Players
     for (const e of this.players.values()) e.seen = false;
-    for (const p of v.players) this.updatePlayer(p, now, dt, flashOf(p.id));
+    for (const [id, until] of this.koBodies) if (now > until) this.koBodies.delete(id);
+    for (const p of v.players) if (!this.koBodies.has(p.id)) this.updatePlayer(p, now, dt, flashOf(p.id));
     for (const [id, e] of this.players) if (!e.seen) { this.scene.remove(e.obj); this.players.delete(id); }
 
     // See-through bush when you're inside it.
@@ -1020,7 +1467,13 @@ export class Renderer3D extends Renderer {
         this.bushGroups[tile.v].children.forEach((im) => { im.setMatrixAt(tile.index, hide); im.instanceMatrix.needsUpdate = true; });
         const copy = this.models[`bush${tile.v}`].clone(true);
         copy.traverse((o) => {
-          if (o.isMesh) { o.material = o.material.clone(); o.material.transparent = true; o.material.opacity = 0.35; o.material.depthWrite = false; o.castShadow = false; }
+          if (o.isMesh) {
+            const src = this.decoMats?.get(`bush${tile.v}|${o.material.uuid}`) ?? o.material;
+            o.material = src.clone();
+            o.material.onBeforeCompile = src.onBeforeCompile;
+            o.material.customProgramCacheKey = src.customProgramCacheKey;
+            o.material.transparent = true; o.material.opacity = 0.35; o.material.depthWrite = false; o.castShadow = false;
+          }
         });
         copy.applyMatrix4(tile.matrix);
         this.myBush.add(copy);
@@ -1087,6 +1540,7 @@ export class Renderer3D extends Renderer {
       bigbomb: new THREE.MeshStandardMaterial({ color: '#7a1010', roughness: 0.3 }),
       zone: new THREE.MeshBasicMaterial({ color: '#ff3b3b', transparent: true, opacity: 0.22, depthWrite: false }),
     };
+    for (const m of Object.values(bulletMats)) m.userData.shared = true;
     this.syncMap(this.projObjs, v.projs, (p) => {
       const obj = new THREE.Group();
       if (p.k === 'l') {
@@ -1100,17 +1554,27 @@ export class Renderer3D extends Renderer {
           new THREE.MeshBasicMaterial({ color: '#ff5a3b', transparent: true, opacity: 0.85, depthWrite: false }));
         ring.position.set(p.tx * U, 0.06, p.ty * U);
         obj.add(bomb, zone, ring);
+        bomb.geometry.userData.lob = true;
         obj.userData = { bomb, zone, ring, peak: 0.9 + 2.4 * Math.hypot(p.tx - p.sx, p.ty - p.sy) / 500 + (p.big ? 0.6 : 0) };
         this.scene.add(obj);
-        return { obj, lob: true };
+        return { obj, lob: true, disposable: true };
       }
       const r = p.k === 'p' ? 0.09 : p.k === 'o' ? 0.24 : 0.12;
-      const core = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), bulletMats[p.k]);
+      this.coreGeos ??= {};
+      this.coreGeos[p.k] ??= Object.assign(new THREE.SphereGeometry(r, 10, 8), { userData: { shared: true } });
+      const core = new THREE.Mesh(this.coreGeos[p.k], bulletMats[p.k]);
       const glow = new THREE.Sprite(this.glowMat(p.k));
       glow.scale.setScalar(r * 6);
       obj.add(core, glow);
+      let streak = null;
+      if (p.k !== 'o') {
+        // A bright tracer streak trailing the shot.
+        streak = new THREE.Mesh(this.streakGeo(), this.streakMat(p.k));
+        streak.visible = false;
+        obj.add(streak);
+      }
       this.scene.add(obj);
-      return { obj };
+      return { obj, streak };
     }, (o, p) => {
       if (o.lob) {
         const gx = p.sx + (p.tx - p.sx) * p.p, gy = p.sy + (p.ty - p.sy) * p.p;
@@ -1124,8 +1588,18 @@ export class Renderer3D extends Renderer {
         u.zone.material.color.set(flash ? '#ffd0c0' : '#ff3b3b');
         return;
       }
+      if (o.streak && o.px != null && (p.x !== o.px || p.y !== o.py)) {
+        o.streak.visible = true;
+        o.streak.rotation.y = -Math.atan2(p.y - o.py, p.x - o.px);
+      }
+      o.px = p.x; o.py = p.y;
       o.obj.position.set(p.x * U, p.k === 'o' ? 0.26 : 0.75, p.y * U);
       if (p.k === 'o') o.obj.rotation.x += 0.4; // the Bowler rolls
+      if (tileAt(p.x, p.y) === '*') {
+        const b = this.bushByTile?.get(`${Math.floor(p.y / TILE)},${Math.floor(p.x / TILE)}`);
+        if (b) { this.rustleBush(b, 0.6); if (!o.inBush) this.leafBurst(p.x * U, p.y * U, 2); }
+        o.inBush = true;
+      } else o.inBush = false;
       // Splash where shots cross a pond (once per crossing).
       const wet = tileAt(p.x, p.y) === 'w';
       if (wet && !o.wet) this.splash(p.x, p.y, now);
@@ -1185,10 +1659,28 @@ export class Renderer3D extends Renderer {
     // Effects
     this.fx = this.fx.filter((f) => {
       const k = (now - f.born) / 1000 / f.life;
-      if (k >= 1) { this.scene.remove(f.obj); return false; }
+      if (k >= 1) { this.scene.remove(f.obj); if (!f.keep) this.disposeObj(f.obj); return false; }
       f.update(k);
       return true;
     });
+    this.stepPuffs(Math.min(dt, 0.05));
+    this.stepScorch(now);
+    this.stepPollen(t);
+    for (const b of this.boomLights) {
+      const k = (now - b.born) / 300;
+      b.light.intensity = k >= 0 && k < 1 ? b.peak * (1 - k) * (1 - k) : 0;
+    }
+    if (this.rustling) {
+      this.rustling = false;
+      const decay = Math.exp(-6 * dt);
+      this.bushRustle.forEach((arr, vi) => {
+        let any = false;
+        for (let i = 0; i < arr.length; i++) { if (arr[i] > 0.01) { arr[i] *= decay; any = true; } else arr[i] = 0; }
+        if (any) this.rustling = true;
+        const attr = this.bushGroups[vi]?.userData.rustle;
+        if (attr) attr.needsUpdate = true;
+      });
+    }
 
     this.animateWildlife(t);
     if (this.composer) this.composer.render(dt);
@@ -1215,6 +1707,7 @@ export class Renderer3D extends Renderer {
       tail.scale.setScalar(1.8);
       out.rock.add(tail);
       obj.add(out.ring, out.rock);
+      out.disposable = true;
     } else {
       // A little fairy ring of mushrooms.
       const stem = new THREE.MeshStandardMaterial({ color: '#f3ead2', roughness: 0.8 });
@@ -1233,6 +1726,7 @@ export class Renderer3D extends Renderer {
       }
       const glow = new THREE.Sprite(this.glowMat('heal'));
       glow.scale.setScalar(z.r * U * 1.6);
+      out.disposable = true;
       glow.position.y = 0.2;
       glow.material.opacity = 0.4;
       obj.add(glow);
@@ -1269,6 +1763,36 @@ export class Renderer3D extends Renderer {
     }
   }
 
+  streakGeo() {
+    if (!this.streakG) {
+      // Flat quad from the head (x = 0) back to the tail (x = -0.9).
+      this.streakG = new THREE.PlaneGeometry(0.9, 0.16).rotateX(-Math.PI / 2).translate(-0.45, 0, 0);
+      this.streakG.userData.shared = true;
+    }
+    return this.streakG;
+  }
+
+  streakMat(kind) {
+    this.streakMats ??= {};
+    if (this.streakMats[kind]) return this.streakMats[kind];
+    if (!this.streakTex) {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 8;
+      const g = c.getContext('2d');
+      const grd = g.createLinearGradient(0, 0, 64, 0);
+      grd.addColorStop(0, 'rgba(255,255,255,0)');
+      grd.addColorStop(1, 'rgba(255,255,255,0.9)');
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 64, 8);
+      this.streakTex = new THREE.CanvasTexture(c);
+    }
+    const col = { b: '#fff3a8', p: '#ffb347', v: '#7fe9ff' }[kind] ?? '#ffffff';
+    const m = new THREE.MeshBasicMaterial({ map: this.streakTex, color: col, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    m.userData.shared = true;
+    this.streakMats[kind] = m;
+    return m;
+  }
+
   glowMat(kind) {
     this.glowMats ??= {};
     if (this.glowMats[kind]) return this.glowMats[kind];
@@ -1284,6 +1808,7 @@ export class Renderer3D extends Renderer {
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
     this.glowMats[kind] = new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false });
+    this.glowMats[kind].userData.shared = true;
     return this.glowMats[kind];
   }
 

@@ -209,6 +209,8 @@ input.onFire = (intent) => tryFire(intent);
 input.onSuper = (intent) => trySuper(intent);
 input.onEmote = (n) => sendEmote(n);
 input.onSwap = () => trySwap();
+// Test hook (only with ?debug in the URL): lets automated visual tests trigger effects.
+if (new URLSearchParams(location.search).has('debug')) window.bw = { get renderer() { return renderer; }, net, app };
 input.onGadget = () => tryGadget();
 
 // ---------- networking ----------
@@ -811,6 +813,10 @@ function tryFire(intent) {
   net.me.ammo -= 1;
   send({ t: 'f', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist), l: lead() });
   spawnLocalShots(aim.angle, aim.dist, false);
+  // Flash and bang the instant you fire, not when the host's echo arrives.
+  const w = weaponOf(myBrawler(), net.me.weapon).attack;
+  renderer.addEvent({ k: 'shot', id: app.myId, w, a: aim.angle, x: net.pred.x, y: net.pred.y }, performance.now());
+  if (w !== 'melee') sfx.shot(w);
 }
 
 // Swap main <-> alt weapon. Predicted locally (instant UI), confirmed by the host.
@@ -1005,25 +1011,30 @@ function lerpItems(a = [], b = [], k) {
 }
 
 function handleEvent(e, now) {
-  if ((e.k === 'melee' || e.k === 'swap') && e.id === app.myId) return; // already shown the instant we acted
+  if ((e.k === 'melee' || e.k === 'swap' || e.k === 'shot') && e.id === app.myId) return; // already shown the instant we acted
   renderer.addEvent(e, now);
   const vol = e.x != null ? Math.max(0, 1 - Math.hypot(e.x - net.cam.x, e.y - net.cam.y) / 1100) : 1;
   switch (e.k) {
     case 'dmg':
-      if (e.id === app.myId) { renderer.hurt(now); renderer.shake(e.src === 'hit' ? 12 : 5); sfx.hurt(); }
+      if (e.id === app.myId) {
+        const from = e.by ? net.view?.players.find((p) => p.id === e.by) : null;
+        renderer.hurt(now);
+        renderer.shake(e.src === 'hit' || e.src === 'meteor' ? 12 : 5, from?.x, from?.y);
+        sfx.hurt();
+      }
       else if (e.by === app.myId) sfx.hit();
       break;
     case 'shot': if (vol > 0 && e.w !== 'melee') sfx.shot(e.w, vol); break;
     case 'melee': if (vol > 0) sfx.swoosh(vol); break;
     case 'swap': if (vol > 0.3) sfx.swap(vol * 0.6); break;
-    case 'boom': if (vol > 0) { sfx.boom(e.big, vol); renderer.shake((e.big ? 16 : 8) * vol); } break;
+    case 'boom': if (vol > 0) { sfx.boom(e.big, vol); renderer.shake((e.big ? 16 : 8) * vol, e.x, e.y); } break;
     case 'ko': sfx.ko(Math.max(vol, 0.3)); onKnockout(e); break;
     case 'cube': case 'gem': if (e.id === app.myId) sfx.cube(); break;
     case 'crate': if (vol > 0) sfx.crate(vol); break;
     case 'crateBreak': if (vol > 0) sfx.crateBreak(vol); break;
     case 'super': if (vol > 0) { sfx.super(vol); renderer.shake(6 * vol); } break;
     case 'haunt': if (vol > 0) sfx.haunt(vol); break;
-    case 'meteor': if (vol > 0) { sfx.boom(true, vol); renderer.shake(14 * vol); } break;
+    case 'meteor': if (vol > 0) { sfx.boom(true, vol); renderer.shake(14 * vol, e.x, e.y); } break;
     case 'drink': if (e.id === app.myId) { sfx.drink(); toast(`⚡ Energy Drink! Double damage for ${DRINK.time} s`); } else if (vol > 0.3) sfx.drink(vol * 0.5); break;
     case 'gadget': if (e.id !== app.myId && vol > 0) sfx.gadget(vol); break;
     case 'jump': if (vol > 0) sfx.jump(vol); break;
