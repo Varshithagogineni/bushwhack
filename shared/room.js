@@ -11,6 +11,9 @@ const RECONNECT_GRACE_MS = 30_000;
 const RESULTS_MS = 15_000;
 const MAX_QUEUED_INPUTS = 8;
 const MAX_GEMS_ON_MAP = 20;
+// Bot difficulty: slower reactions, sloppier aim, pauses between shots and a small damage handicap,
+// so friends playing for the first time can beat them.
+const BOT = { react: 0.75, reactJitter: 0.4, aim: 0.5, lobAim: 0.28, lobLead: 0.65, fireChance: 0.03, shotGap: 0.45, superChance: 0.02, superRate: 0.7, damage: 0.85, strafe: 0.55, sight: 640, gadgetChance: 0.04 };
 const BOT_NAMES = ['Rex', 'Pip', 'Juno', 'Mako', 'Tilly', 'Ozzy', 'Nova', 'Bolt'];
 
 export class Room {
@@ -514,7 +517,7 @@ export class Room {
     return speedFactor(p.x, p.y, this.haunts) * (this.time < p.boostUntil ? DRINK.speed : 1);
   }
   powerOf(p) {
-    return (1 + CUBE_DMG * p.cubes) * (this.time < p.boostUntil ? DRINK.dmg : 1);
+    return (1 + CUBE_DMG * p.cubes) * (this.time < p.boostUntil ? DRINK.dmg : 1) * (p.bot ? BOT.damage : 1);
   }
 
   // A random spot on open floor inside the safe zone.
@@ -887,7 +890,7 @@ export class Room {
     p.lastHurt = this.time;
     if (attacker) p.revealUntil = Math.max(p.revealUntil, this.time + REVEAL_TIME);
     if (attacker && attacker.alive && attacker !== p) {
-      attacker.superCharge = Math.min(1, attacker.superCharge + amount / BRAWLERS[attacker.brawler].super.charge);
+      attacker.superCharge = Math.min(1, attacker.superCharge + (amount / BRAWLERS[attacker.brawler].super.charge) * (attacker.bot ? BOT.superRate : 1));
     }
     this.events.push({
       k: 'dmg', id: p.id, x: Math.round(p.x), y: Math.round(p.y), a: Math.round(amount),
@@ -978,7 +981,7 @@ export class Room {
     for (const o of fighters) {
       if (o === p || !o.alive || this.sameTeam(p, o) || !this.canSee(p, o)) continue;
       const d = Math.hypot(o.x - p.x, o.y - p.y);
-      if (d < td && d < 720) { td = d; target = o; }
+      if (d < td && d < BOT.sight) { td = d; target = o; }
     }
     // Early in Showdown, bots loot crates and only fight what gets in their face.
     if (target && this.mode === 'showdown' && this.matchTime < 25 && td > 300) { target = null; td = Infinity; }
@@ -993,7 +996,7 @@ export class Room {
       else if (gem && (!target || gem.d < td * 0.8)) goal = gem;
       if (goal && target && td > 260) target = null;
     }
-    if (target !== ai.target) { ai.target = target; ai.reactAt = this.time + 0.45 + Math.random() * 0.3; }
+    if (target !== ai.target) { ai.target = target; ai.reactAt = this.time + BOT.react + Math.random() * BOT.reactJitter; }
     // Weapon choice: the shortest-range weapon that still reaches the target (else the longest), at most every 3 s.
     ai.pickT -= DT;
     if (target && ai.pickT <= 0) {
@@ -1014,7 +1017,7 @@ export class Room {
       if (ring) { goal = ring; if (target && td > 200) target = null; }
     }
     // Gadgets
-    if (p.gadgets > 0 && this.time >= p.gadgetCd && Math.random() < 0.1) {
+    if (p.gadgets > 0 && this.time >= p.gadgetCd && Math.random() < BOT.gadgetChance) {
       if (p.brawler === 'brick' && p.hp < p.maxHp * 0.4) this.useGadget(p);
       else if (p.brawler === 'vex' && target && td < 250 && p.hp < p.maxHp * 0.35) {
         ai.blinkX = -(target.x - p.x) / td; ai.blinkY = -(target.y - p.y) / td;
@@ -1037,8 +1040,8 @@ export class Room {
       const dir = hurt ? -1 : d > want ? 1 : -0.8; // low on health: back off and let regen kick in
       ai.strafeT -= DT;
       if (ai.strafeT <= 0) { ai.strafe = Math.random() < 0.5 ? -1 : 1; ai.strafeT = 0.6 + Math.random(); }
-      mx = (dx / d) * dir + (-dy / d) * 0.7 * ai.strafe;
-      my = (dy / d) * dir + (dx / d) * 0.7 * ai.strafe;
+      mx = (dx / d) * dir + (-dy / d) * BOT.strafe * ai.strafe;
+      my = (dy / d) * dir + (dx / d) * BOT.strafe * ai.strafe;
       const los = hasLineOfSight(p.x, p.y, target.x, target.y);
       const lob = b.attack === 'lob';
       // Throwers lob only from a sensible distance (closer still over walls) and lead moving targets.
@@ -1048,15 +1051,19 @@ export class Room {
         if (lob) {
           const vx = target.x - (ai.tpx ?? target.x), vy = target.y - (ai.tpy ?? target.y);
           const t = lobFlight(d);
-          tx += (vx / DT) * t * 0.8; ty += (vy / DT) * t * 0.8;
+          tx += (vx / DT) * t * BOT.lobLead; ty += (vy / DT) * t * BOT.lobLead;
         }
         const ex = tx - p.x, ey = ty - p.y, ed = Math.max(1, Math.hypot(ex, ey));
-        const a = Math.atan2(ey, ex) + (Math.random() - 0.5) * (lob ? 0.24 : 0.4);
+        const a = Math.atan2(ey, ex) + (Math.random() - 0.5) * (lob ? BOT.lobAim : BOT.aim);
         const err = lob ? 1 + (Math.random() * 2 - 1) * (0.08 + 0.1 * ed / b.range) : 1;
-        if (p.superCharge >= 1 && d < b.super.range * 0.85 && Math.random() < 0.05) {
+        if (p.superCharge >= 1 && d < b.super.range * 0.85 && Math.random() < BOT.superChance) {
           this.superFire(p, Math.cos(a), Math.sin(a), ed * err);
-        } else if (d < b.range * 0.92 && p.ammo >= 1 && Math.random() < 0.045) {
-          this.fire(p, Math.cos(a), Math.sin(a), ed * err);
+        } else if (d < b.range * 0.92 && p.ammo >= 1 && this.time >= (ai.nextShot ?? 0) && Math.random() < BOT.fireChance) {
+          // Usually keep a shot in reserve, and take a breath between shots.
+          if (p.ammo >= 2 || Math.random() < 0.35) {
+            this.fire(p, Math.cos(a), Math.sin(a), ed * err);
+            ai.nextShot = this.time + BOT.shotGap + Math.random() * 0.4;
+          }
         }
       }
       ai.tpx = target.x; ai.tpy = target.y;
