@@ -93,6 +93,10 @@ export const sfx = {
   emote() { tone(700, 0.06, { type: 'triangle', vol: 0.1 }); },
   swap(v = 1) { tone(520, 0.05, { type: 'square', vol: 0.1 * v }); tone(780, 0.07, { type: 'square', vol: 0.1 * v, delay: 0.05 }); },
   swoosh(v = 1) { noise(0.16, { vol: 0.35 * v, freq: 2600, q: 0.5 }); tone(160, 0.12, { type: 'sine', vol: 0.15 * v, to: 60, delay: 0.1 }); },
+  gadget(v = 1) { tone(880, 0.06, { type: 'triangle', vol: 0.14 * v }); tone(1320, 0.1, { type: 'triangle', vol: 0.12 * v, delay: 0.05 }); },
+  drink(v = 1) { noise(0.12, { vol: 0.25 * v, freq: 4000 }); [660, 880, 1100].forEach((f, i) => tone(f, 0.08, { type: 'square', vol: 0.1 * v, delay: 0.08 + i * 0.05 })); },
+  jump(v = 1) { tone(220, 0.35, { type: 'sine', vol: 0.22 * v, to: 880 }); },
+  shroom(v = 1) { tone(520, 0.25, { type: 'sine', vol: 0.12 * v, to: 780 }); },
   win() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, { type: 'triangle', vol: 0.18, delay: i * 0.12 })); },
   lose() { [392, 330, 262].forEach((f, i) => tone(f, 0.3, { type: 'triangle', vol: 0.15, delay: i * 0.15 })); },
 };

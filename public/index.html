@@ -57,11 +57,13 @@
         <li><b>Land hits to charge your Super</b> (yellow ring under you), then unleash it.</li>
         <li><b>Knocked out? You're not done.</b> Come back as a 👻 ghost, float through walls and drop haunts that slow and hurt the survivors.</li>
         <li><b>Two weapons each.</b> Swap any time: Brick's 💥 Blunderbuss or 👊 Haymaker punch, Vex's 🎯 Bamboo Rifle or 🪶 Fan Bolts, Boom's 💣 Clay Bomb or 🎳 Bowler. Big hits <b>knock players back</b>, so shove them into the poison!</li>
+        <li><b>Gadgets:</b> 3 per match. Brick heals 🩹, Vex blinks 💨, Boom drops a pot bomb 🫙. <b>Jump pads</b> fling you over walls.</li>
+        <li><b>Match twists</b> shake up every game: ☄️ meteor showers, ⚡ energy drinks (double damage) or 🍄 healing shrooms.</li>
         <li><b>Ammo</b> (3 bars under you) refills on its own. Health heals when you stop fighting.</li>
       </ul>
       <div class="controls">
-        <div><h3>Laptop</h3><p><kbd>WASD</kbd> move · <b>mouse</b> aim · <b>click</b> shoot · <kbd>Space</kbd> auto-aim · <kbd>E</kbd> / <b>right-click</b> Super · <kbd>Q</kbd> / <b>scroll</b> swap weapon · <kbd>1</kbd>–<kbd>4</kbd> emotes</p></div>
-        <div><h3>Phone</h3><p><b>Left thumb</b> move · <b>right thumb</b> drag to aim, release to shoot · <b>tap</b> to auto-aim · <b>SUPER</b> button when charged · <b>SWAP</b> button above it</p></div>
+        <div><h3>Laptop</h3><p><kbd>WASD</kbd> move · <b>mouse</b> aim · <b>click</b> shoot · <kbd>Space</kbd> auto-aim · <kbd>E</kbd> / <b>right-click</b> Super · <kbd>Q</kbd> / <b>scroll</b> swap weapon · <kbd>F</kbd> gadget · <kbd>1</kbd>–<kbd>4</kbd> emotes</p></div>
+        <div><h3>Phone</h3><p><b>Left thumb</b> move · <b>right thumb</b> drag to aim, release to shoot · <b>tap</b> to auto-aim · <b>SUPER</b> button when charged · <b>SWAP</b> button above it · <b>gadget</b> button to its left</p></div>
       </div>
     </section>
   </main>
@@ -90,6 +92,8 @@
       <h2>Game mode</h2>
       <div id="modeCards" class="modes"></div>
       <p id="modeHint" class="hint"></p>
+      <h2 class="twist-head">Match twist</h2>
+      <div id="twistCards" class="modes twists"></div>
     </section>
 
     <section class="panel">
@@ -175,6 +179,7 @@
       </div>
       <div id="killFeed"></div>
       <div id="centerMsg"></div>
+      <div id="twistBanner"></div>
       <div id="superHint"></div>
       <div id="spectateMsg"></div>
       <div id="koCard" class="ko-card hidden">
@@ -196,6 +201,7 @@
       <div class="results-card">
         <h2 id="resultTitle"></h2>
         <p id="resultSub" class="muted"></p>
+        <div id="mvp" class="mvp hidden"></div>
         <div id="progress" class="progress hidden"></div>
         <ol id="resultList"></ol>
         <button id="againBtn" class="btn primary big">Continue</button>

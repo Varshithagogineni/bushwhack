@@ -30,7 +30,7 @@ export const CRATE_HP = 2600;
 export const GHOST_SPEED = 300;
 // Ghost Mode: knocked-out players float through walls and drop haunts that slow and hurt survivors.
 export const HAUNT = { radius: 85, life: 3, cooldown: 5, slow: 0.5, dps: 220 };
-export const EMOTES = ['👍', '😂', '😡', 'GG'];
+export const EMOTES = ['👍', '😂', '😡', 'GG', '🙏', '🔥'];
 export const RESPAWN_TIME = 3;
 
 // Knockback physics: impulses add velocity that decays each step; walls stop it (no bouncing players).
@@ -39,6 +39,29 @@ export const KB = { decay: 0.86, max: 1400, stop: 20, dashArmor: 0.25, showdownS
 export const ITEM = { decay: 0.9, bounce: 0.45, settled: 60, launchMin: 220, launchMax: 380 };
 export const SWAP_TIME = 0.35;
 export const GEM = { every: 6, toWin: 10, countdown: 15, pickup: 44 };
+
+// Lobbed bombs: flight time grows with distance, so close throws land fast and long ones can be dodged.
+export const lobFlight = (d) => 0.3 + d / 750;
+// Splash damage falls off from the full value in the inner half of the blast to (1 - falloff) at the rim.
+export function blastDamage(dmg, d, blast, falloff = 0) {
+  const inner = blast * 0.5;
+  const k = clamp((d - inner) / (blast + 13 - inner), 0, 1);
+  return dmg * (1 - falloff * k);
+}
+
+// Match Twists: one random modifier per match, Brawl Stars style.
+export const MODIFIERS = {
+  meteor: { name: 'Meteor Shower', icon: '☄️', blurb: 'Meteors rain down. Step out of the red rings!' },
+  drink: { name: 'Energy Drink', icon: '⚡', blurb: 'Grab the glowing can: double damage and extra speed for 10 s.' },
+  shrooms: { name: 'Healing Shrooms', icon: '🍄', blurb: 'Green mushroom rings pop up. Stand in them to heal.' },
+};
+export const MODIFIER_IDS = Object.keys(MODIFIERS);
+export const METEOR = { start: 15, every: 7, everyLate: 5, telegraph: 1.6, r: 95, dmg: 1600, knock: 800, crateDmg: 2600 };
+export const DRINK = { start: 10, every: 20, time: 10, dmg: 2, speed: 1.3 };
+export const SHROOM = { start: 8, every: 12, max: 4, life: 25, r: 80, heal: 400 };
+export const GADGET = { uses: 3, cooldown: 3 };
+// Jump pads launch you over walls toward the middle of the map.
+export const JUMP = { speed: 1100, dist: 320, radius: 30, cooldown: 1 };
 
 // Game modes, Brawl Stars style. Teams are 0 (blue) and 1 (red).
 export const MODES = {
@@ -64,7 +87,8 @@ export const BRAWLERS = {
     hp: 5800, speed: 225, reload: 1.5,
     weapon: 'Blunderbuss', icon: '💥',
     attack: 'shotgun', range: 320, pellets: 5, spread: 0.55, damage: 360, projSpeed: 1150, knock: 40,
-    alt: { weapon: 'Haymaker', icon: '👊', attack: 'melee', range: 136, arc: 0.87, damage: 2000, windup: 0.12, knock: 420, reload: 1.1 },
+    alt: { weapon: 'Haymaker', icon: '👊', attack: 'melee', range: 136, arc: 0.87, damage: 1700, windup: 0.18, knock: 420, reload: 1.1 },
+    gadget: { name: 'Patch Up', icon: '🩹', desc: 'Heal 1400 instantly', heal: 1400 },
     super: { kind: 'charge', name: 'Bulldoze', desc: 'Charge forward, smashing enemies and crates', range: 380, speed: 1150, damage: 1500, charge: 2600 },
     stats: { health: 5, range: 1, damage: 4 },
   },
@@ -75,7 +99,8 @@ export const BRAWLERS = {
     weapon: 'Bamboo Rifle', icon: '🎯',
     attack: 'bullet', range: 760, damage: 1150, projSpeed: 1500, knock: 120,
     alt: { weapon: 'Fan Bolts', icon: '🪶', attack: 'shotgun', pellets: 3, spread: 0.3, range: 400, damage: 560, projSpeed: 1300, knock: 60 },
-    super: { kind: 'volley', name: 'Piercing Volley', desc: 'Five shots that pierce through enemies', shots: 5, spread: 0.32, range: 860, damage: 950, projSpeed: 1700, charge: 3000 },
+    gadget: { name: 'Blink', icon: '💨', desc: 'Teleport-dash a short hop', dist: 200, speed: 2400 },
+    super: { kind: 'volley', name: 'Piercing Volley', desc: 'Five shots that pierce through enemies', shots: 5, spread: 0.32, range: 860, damage: 780, projSpeed: 1700, charge: 3000 },
     stats: { health: 2, range: 5, damage: 3 },
   },
   boom: {
@@ -83,9 +108,10 @@ export const BRAWLERS = {
     desc: 'Lobs clay-pot bombs over rocks. Splash damage.',
     hp: 3400, speed: 245, reload: 1.75,
     weapon: 'Clay Bomb', icon: '💣',
-    attack: 'lob', range: 560, damage: 1300, blast: 85, flight: 0.65, knock: 500,
+    attack: 'lob', range: 500, minRange: 100, damage: 1400, blast: 70, falloff: 0.5, knock: 500,
     alt: { weapon: 'Bowler', icon: '🎳', attack: 'bullet', range: 420, damage: 950, projSpeed: 650, hitR: 30, pierce: true, knock: 200, reload: 1.49 },
-    super: { kind: 'mega', name: 'Mega Bomb', desc: 'A huge bomb with a massive blast', range: 640, damage: 2300, blast: 150, flight: 0.9, charge: 2800 },
+    gadget: { name: 'Drop Pot', icon: '🫙', desc: 'Drop a bomb at your feet that blasts enemies away', damage: 1000, blast: 90, fuse: 1, knock: 650 },
+    super: { kind: 'mega', name: 'Mega Bomb', desc: 'A huge bomb with a massive blast', range: 600, minRange: 100, damage: 2300, blast: 140, falloff: 0.4, charge: 2800 },
     stats: { health: 3, range: 4, damage: 4 },
   },
 };
@@ -312,6 +338,21 @@ export function crateSpots() {
   }
   return spots;
 }
+
+// Jump pads: quadrant tiles mirrored four ways, each pointing at the centre. Pads whose landing spot isn't open floor are dropped.
+const PAD_TILES = [[9, 2], [16, 12]];
+export const JUMP_PADS = (() => {
+  const pads = [];
+  for (const [r, c] of PAD_TILES) {
+    for (const [rr, cc] of [[r, c], [r, MAP_TILES - 1 - c], [MAP_TILES - 1 - r, c], [MAP_TILES - 1 - r, MAP_TILES - 1 - c]]) {
+      const x = cc * TILE + TILE / 2, y = rr * TILE + TILE / 2;
+      const d = Math.hypot(CENTER - x, CENTER - y), dx = (CENTER - x) / d, dy = (CENTER - y) / d;
+      const lx = x + dx * JUMP.dist, ly = y + dy * JUMP.dist;
+      if (MAP[rr][cc] === '.' && (tileAt(lx, ly) === '.' || tileAt(lx, ly) === '*')) pads.push({ x, y, dx: round2(dx), dy: round2(dy) });
+    }
+  }
+  return pads;
+})();
 
 export function spawnPoints(n) {
   const pts = [];
