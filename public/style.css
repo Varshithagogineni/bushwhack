@@ -507,3 +507,7 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
 .mvp-stat { display: flex; flex-direction: column; line-height: 1.1; }
 .mvp-stat b { font-size: 1.1rem; }
 .mvp-stat span { font-size: 0.72rem; color: var(--ink-soft); }
+/* Short phone screens: keep the twist banner clear of your own brawler (centre) and the buttons. */
+@media (max-height: 520px) {
+  #twistBanner { top: auto; bottom: max(78px, calc(env(safe-area-inset-bottom) + 70px)); font-size: 1rem; max-width: 52%; padding: 4px 12px; }
+}
