@@ -1,5 +1,5 @@
-import { MAP, MAP_TILES, TILE, WORLD, CENTER, PLAYER_RADIUS, CRATE_R, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, weaponOf } from '/shared/game.js';
-import { STICK_R, superButton, swapButton } from './input.js';
+import { MAP, MAP_TILES, TILE, WORLD, CENTER, PLAYER_RADIUS, CRATE_R, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, weaponOf, JUMP_PADS, JUMP } from '/shared/game.js';
+import { STICK_R, superButton, swapButton, gadgetButton } from './input.js';
 import { art, drawChar, drawProp, drawGround } from './assets.js';
 
 const R = PLAYER_RADIUS;
@@ -326,6 +326,27 @@ export class Renderer {
       ctx.globalAlpha = 1;
     }
 
+    // Jump pads and Match Twist zones
+    for (const pad of JUMP_PADS) {
+      ctx.fillStyle = '#d9a441';
+      ctx.beginPath(); ctx.arc(pad.x, pad.y, JUMP.radius * 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.font = 'bold 22px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff3c4';
+      ctx.save(); ctx.translate(pad.x, pad.y); ctx.rotate(Math.atan2(pad.dy, pad.dx)); ctx.fillText('»', 0, 8); ctx.restore();
+    }
+    for (const z of v.zones ?? []) {
+      const meteor = z.k === 'm';
+      ctx.fillStyle = meteor ? `rgba(255,42,26,${0.2 + 0.25 * Math.max(0, 1 - z.l / 1.6)})` : 'rgba(95,224,164,0.28)';
+      ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = meteor ? '#ff2a1a' : '#5fe0a4';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(z.x, z.y, meteor ? z.r * (1 + Math.max(0, Math.min(1, z.l / 1.6))) : z.r, 0, Math.PI * 2); ctx.stroke();
+      ctx.font = '28px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText(meteor ? '☄️' : '🍄', z.x, z.y + 10);
+    }
+
     // Lob landing zones
     for (const p of v.projs) {
       if (p.k !== 'l') continue;
@@ -359,6 +380,10 @@ export class Renderer {
     }
     for (const c of v.cubes) {
       const bob = Math.sin(t * 3 + c.i) * 3;
+      if (c.k === 'drink') {
+        items.push([c.y, () => { ctx.font = '30px system-ui'; ctx.textAlign = 'center'; ctx.fillText('🥤', c.x, c.y + bob + 10); }]);
+        continue;
+      }
       items.push([c.y, () => {
         if (A) {
           ctx.fillStyle = 'rgba(46,232,122,0.25)';
@@ -639,7 +664,7 @@ export class Renderer {
     ctx.fillRect(0, 0, this.w, this.h);
   }
 
-  drawSticks({ left, right, superStick, hint, ghost, brawler, weapon }, me) {
+  drawSticks({ left, right, superStick, hint, ghost, brawler, weapon, gd = 0, gcd = 0 }, me) {
     const { ctx } = this;
     const stick = (s, color) => {
       const dx = s.x - s.ox, dy = s.y - s.oy, d = Math.hypot(dx, dy) || 1;
@@ -667,6 +692,26 @@ export class Renderer {
       ctx.font = '900 10px system-ui';
       ctx.fillStyle = 'rgba(255,255,255,0.8)';
       ctx.fillText('SWAP', wb.x, wb.y + wb.r + 12);
+      // Gadget button: icon, uses left as pips, cooldown sweep.
+      const gb = gadgetButton();
+      const ready = gd > 0 && gcd <= 0;
+      ctx.fillStyle = ready ? 'rgba(40,120,100,0.75)' : 'rgba(40,28,18,0.45)';
+      ctx.strokeStyle = ready ? '#7fe9d0' : 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(gb.x, gb.y, gb.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      if (gcd > 0 && gd > 0) {
+        ctx.strokeStyle = '#7fe9d0';
+        ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.arc(gb.x, gb.y, gb.r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (1 - gcd / 3)); ctx.stroke();
+      }
+      ctx.globalAlpha = gd > 0 ? 1 : 0.4;
+      ctx.font = '22px system-ui';
+      ctx.fillText(BRAWLERS[brawler].gadget.icon, gb.x, gb.y + 8);
+      ctx.globalAlpha = 1;
+      for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = i < gd ? '#7fe9d0' : 'rgba(255,255,255,0.25)';
+        ctx.beginPath(); ctx.arc(gb.x - 10 + i * 10, gb.y + gb.r + 9, 3.5, 0, Math.PI * 2); ctx.fill();
+      }
     }
     if (!ghost && me) {
       const sb = superButton();

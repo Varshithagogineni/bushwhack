@@ -1,9 +1,10 @@
 import {
   DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES, MODES, MODE_IDS,
   movePlayer, moveGhost, speedFactor, round2, inBush, isWallAt, clamp, PLAYER_RADIUS, weaponOf, SWAP_TIME,
+  lobFlight, MODIFIERS, MODIFIER_IDS, GADGET, DRINK,
 } from '/shared/game.js';
 import { BADGES } from '/shared/badges.js';
-import { Input } from './input.js';
+import { Input, STICK_R } from './input.js';
 import { Renderer, drawBrawler } from './render.js';
 import { art, loadArt, drawPortrait } from './assets.js';
 import { sfx, isMuted, setMuted, setGameAudio } from './sfx.js';
@@ -12,6 +13,7 @@ import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
 const INTERP_MS = 80; // render other players this far in the past so motion stays smooth
 const CLIENT_COOLDOWN = 0.45;
+const VICTORY_MS = 1900; // winner spotlight before the results card
 
 const $ = (id) => document.getElementById(id);
 const safe = (storage) => ({
@@ -38,10 +40,11 @@ const net = {
   snaps: [], offset: null, events: [], pending: [], seq: 0, pred: null, err: { x: 0, y: 0 }, localProjs: [], rtt: null,
   me: { alive: false, ghost: false, ammo: MAX_AMMO, cubes: 0, su: 0, hcd: 0 }, cooldown: 0, lastState: null,
   killedBy: null, cam: { x: CENTER, y: CENTER }, aimAngle: 0, fightShownAt: 0, view: null,
-  lastBeep: null, resultSoundFor: null, wasGhost: false,
+  lastBeep: null, resultSoundFor: null, wasGhost: false, victory: null, gadgetPending: null, kos: [],
   reset() {
     this.snaps = []; this.events = []; this.pending = []; this.pred = null; this.err = { x: 0, y: 0 };
     this.killedBy = null; this.cooldown = 0; this.lastBeep = null; this.wasGhost = false; this.localProjs = [];
+    this.victory = null; this.gadgetPending = null; this.kos = [];
   },
 };
 
@@ -206,6 +209,7 @@ input.onFire = (intent) => tryFire(intent);
 input.onSuper = (intent) => trySuper(intent);
 input.onEmote = (n) => sendEmote(n);
 input.onSwap = () => trySwap();
+input.onGadget = () => tryGadget();
 
 // ---------- networking ----------
 
@@ -370,6 +374,9 @@ function onRoom(room) {
     app.viewingResults = true;
     app.sittingOut = false;
     hideKo();
+    // Let the victory moment play before the results card slides in.
+    app.resultsAt = performance.now() + VICTORY_MS;
+    setTimeout(renderResults, VICTORY_MS + 20);
   }
   if (room.state === 'playing' && prev === 'countdown') net.fightShownAt = performance.now();
   if (me?.out && inPlay) app.sittingOut = true;
@@ -415,6 +422,8 @@ function buildCards() {
       card.append(row);
     }
     card.append(el('super', `⚡ ${b.super.name}`), el('desc super-desc', b.super.desc));
+    card.append(el('super gadget', `${b.gadget.icon} ${b.gadget.name}`), el('desc super-desc', `${b.gadget.desc} (${GADGET.uses} per match)`));
+    card.append(el('desc super-desc', `Weapons: ${b.icon} ${b.weapon} ⇄ ${b.alt.icon} ${b.alt.weapon}`));
     card.addEventListener('click', () => {
       const me = playerById(app.myId);
       if (me) me.brawler = id;
@@ -455,6 +464,21 @@ function buildModeCards() {
   }
 }
 
+function buildTwistCards() {
+  const wrap = $('twistCards');
+  wrap.innerHTML = '';
+  const opts = [['random', '🎲', 'Surprise me', 'A random twist every match'], ...MODIFIER_IDS.map((id) => [id, MODIFIERS[id].icon, MODIFIERS[id].name, MODIFIERS[id].blurb]), ['off', '🚫', 'No twist', 'Classic rules']];
+  for (const [id, icon, name, blurb] of opts) {
+    const card = document.createElement('button');
+    card.className = 'mode twist';
+    card.dataset.id = id;
+    const el = (cls, text) => Object.assign(document.createElement('div'), { className: cls, textContent: text });
+    card.append(el('icon', icon), el('name', name), el('blurb', blurb));
+    card.addEventListener('click', () => send({ t: 'twist', twist: id }));
+    wrap.append(card);
+  }
+}
+
 function playerRow(p, room) {
   const li = document.createElement('li');
   if (!p.connected) li.classList.add('offline');
@@ -484,7 +508,7 @@ function renderLobby() {
   $('stageName').textContent = b.name;
   $('stageRole').textContent = b.role;
   $('stageDesc').textContent = b.desc;
-  $('stageSuper').textContent = `⚡ ${b.super.name}: ${b.super.desc}`;
+  $('stageSuper').textContent = `⚡ ${b.super.name}: ${b.super.desc} · ${b.gadget.icon} ${b.gadget.name}: ${b.gadget.desc}`;
   stage?.setBrawler(mine);
 
   const isHost = room.hostId === app.myId;
@@ -494,6 +518,11 @@ function renderLobby() {
     card.disabled = !isHost;
   }
   $('modeHint').textContent = isHost ? 'You\'re the host: pick the mode.' : `The host picks the mode. Now playing: ${mode.icon} ${mode.name}`;
+  const twist = room.twist ?? 'random';
+  for (const card of $('twistCards').children) {
+    card.classList.toggle('selected', card.dataset.id === twist);
+    card.disabled = !isHost;
+  }
 
   const list = $('playerList');
   list.innerHTML = '';
@@ -543,7 +572,7 @@ function renderLobby() {
 
 function renderResults() {
   const room = app.room;
-  const show = Boolean(app.viewingResults && room?.results);
+  const show = Boolean(app.viewingResults && room?.results && performance.now() >= (app.resultsAt ?? 0));
   $('results').classList.toggle('hidden', !show);
   if (!show) return;
   const mine = room.results.find((r) => r.id === app.myId);
@@ -557,6 +586,27 @@ function renderResults() {
     $('resultSub').textContent = !winner ? 'Nobody won this one!'
       : room.mode === 'bounty' ? `${winner.id === app.myId ? 'You' : winner.name} collected the most stars (${winner.score}⭐)`
         : `${winner.id === app.myId ? 'You' : winner.name} won as ${BRAWLERS[winner.brawler].name}`;
+  }
+  const mvp = room.results.find((r) => r.mvp);
+  const mvpBox = $('mvp');
+  mvpBox.innerHTML = '';
+  mvpBox.classList.toggle('hidden', !mvp);
+  if (mvp) {
+    const pic = document.createElement('canvas');
+    pic.width = pic.height = 96;
+    if (art.ready) drawPortrait(pic.getContext('2d'), mvp.brawler, 96, 96);
+    else { const c = pic.getContext('2d'); c.scale(1.7, 1.7); drawBrawler(c, 28, 30, mvp.brawler, 0.4); }
+    const info = document.createElement('div');
+    info.className = 'mvp-info';
+    const el = (tag, cls, text) => Object.assign(document.createElement(tag), { className: cls, textContent: text });
+    const stats = el('div', 'mvp-stats', '');
+    for (const [label, val] of [['KOs', mvp.kills], ['Damage', (mvp.dmg ?? 0).toLocaleString()], ['Supers', mvp.supers ?? 0]]) {
+      const t = el('div', 'mvp-stat', '');
+      t.append(el('b', '', String(val)), el('span', '', label));
+      stats.append(t);
+    }
+    info.append(el('div', 'mvp-ribbon', '⭐ MVP'), el('div', 'mvp-name', mvp.id === app.myId ? `${mvp.name} (you!)` : mvp.name), stats);
+    mvpBox.append(pic, info);
   }
   const list = $('resultList');
   list.innerHTML = '';
@@ -588,7 +638,7 @@ const latestSnap = () => net.snaps[net.snaps.length - 1];
 // Move our own predicted position one tick, exactly as the server will.
 function predictStep(p, mx, my, snap) {
   if (net.me.ghost) moveGhost(p, mx, my);
-  else movePlayer(p, mx, my, BRAWLERS[myBrawler()].speed * speedFactor(p.x, p.y, snap?.haunts ?? []), snap?.crates ?? []);
+  else movePlayer(p, mx, my, BRAWLERS[myBrawler()].speed * speedFactor(p.x, p.y, snap?.haunts ?? []) * (net.me.boost > 0 ? DRINK.speed : 1), snap?.crates ?? []);
 }
 
 function onSnap(m) {
@@ -610,6 +660,10 @@ function onSnap(m) {
   if (net.swapPending) {
     if (performance.now() < net.swapPending.until && m.me.weapon !== net.swapPending.weapon) net.me.weapon = net.swapPending.weapon;
     else net.swapPending = null;
+  }
+  if (net.gadgetPending) {
+    if (performance.now() < net.gadgetPending.until && m.me.gd > net.gadgetPending.gd) { net.me.gd = net.gadgetPending.gd; net.me.gcd = GADGET.cooldown; }
+    else net.gadgetPending = null;
   }
   if (m.me.alive && prevSu < 1 && m.me.su >= 1 && !document.hidden) sfx.superReady();
   if (m.me.ghost !== net.wasGhost) { net.wasGhost = m.me.ghost; net.pred = null; net.pending = []; }
@@ -652,7 +706,7 @@ function stepInput() {
   send({ t: 'i', s: net.seq, x: mx, y: my, a: round2(net.aimAngle) });
   net.pending.push({ seq: net.seq, mx, my });
   if (net.pending.length > 120) net.pending.shift();
-  predictStep(net.pred, mx, my, latestSnap());
+  if (!latestSnap()?.pmap.get(app.myId)?.d) predictStep(net.pred, mx, my, latestSnap());
   if (input.mouse.down && !input.touchMode && net.me.alive) tryFire({ mouse: true });
 }
 
@@ -684,20 +738,54 @@ function updateAim(mx, my) {
 }
 
 // Turn a fire intent (mouse, drag, or auto-aim tap) into an angle and distance.
-function aimFor(intent, range) {
+const isLob = (spec) => spec.attack === 'lob' || spec.kind === 'mega';
+const enemies = () => {
+  const teams = MODES[net.view?.mode]?.teams;
+  return (net.view?.players ?? []).filter((p) => !p.isMe && !(teams && p.team === net.me.team));
+};
+// Where a lobbed bomb should land to meet a moving target (its flight time depends on the distance).
+function leadTarget(t, from) {
+  let px = t.x, py = t.y;
+  if (Math.hypot(t.vx || 0, t.vy || 0) < 40) return { x: px, y: py };
+  for (let i = 0; i < 2; i++) {
+    const ft = lobFlight(Math.hypot(px - from.x, py - from.y));
+    px = t.x + t.vx * ft; py = t.y + t.vy * ft;
+  }
+  if (isWallAt(px, py)) { px = (px + t.x) / 2; py = (py + t.y) / 2; }
+  return { x: px, y: py };
+}
+// Phone aim stick -> throw distance. Throwers get the whole stick for [minRange, range], so short throws are precise.
+const stickDist = (spec, frac) => (isLob(spec) ? (spec.minRange ?? 0) + frac * (spec.range - (spec.minRange ?? 0)) : frac * spec.range);
+
+function aimFor(intent, spec) {
   const me = { x: net.pred.x, y: net.pred.y };
+  const range = spec.range, lob = isLob(spec);
   let angle = net.aimAngle, dist = range;
   if (intent.auto) {
-    let best = null, bd = range * 1.1;
-    for (const p of net.view?.players ?? []) {
-      if (p.isMe) continue;
+    let best = null, bd = range;
+    for (const p of enemies()) {
       const d = Math.hypot(p.x - me.x, p.y - me.y);
       if (d < bd) { bd = d; best = p; }
     }
-    if (best) { angle = Math.atan2(best.y - me.y, best.x - me.x); dist = bd; }
+    if (best) {
+      const t = lob ? leadTarget(best, me) : best;
+      angle = Math.atan2(t.y - me.y, t.x - me.x);
+      dist = Math.min(range, Math.hypot(t.x - me.x, t.y - me.y));
+    } else if (lob) dist = Math.min(300, range); // nobody close: a mid-range throw, never a full-length lob
   } else if (intent.angle != null) {
     angle = intent.angle;
-    dist = intent.frac * range;
+    dist = stickDist(spec, intent.frac);
+    if (lob) {
+      // Gentle magnet: a throw landing right next to an enemy snaps onto them (leading if they move).
+      const lx = me.x + Math.cos(angle) * dist, ly = me.y + Math.sin(angle) * dist;
+      for (const p of enemies()) {
+        if (Math.hypot(p.x - lx, p.y - ly) > 45) continue;
+        const t = leadTarget(p, me);
+        angle = Math.atan2(t.y - me.y, t.x - me.x);
+        dist = Math.min(range, Math.hypot(t.x - me.x, t.y - me.y));
+        break;
+      }
+    }
   } else if (intent.mouse) {
     const m = mouseAim();
     if (!m) return null;
@@ -716,7 +804,7 @@ function tryFire(intent) {
     return;
   }
   if (net.cooldown > 0 || net.me.ammo < 1 || net.me.swap > 0) return;
-  const aim = aimFor(intent, weaponOf(myBrawler(), net.me.weapon).range);
+  const aim = aimFor(intent, weaponOf(myBrawler(), net.me.weapon));
   if (!aim) return;
   net.aimAngle = aim.angle;
   net.cooldown = CLIENT_COOLDOWN;
@@ -739,12 +827,21 @@ function trySwap() {
 
 function trySuper(intent) {
   if (!canAct() || !net.me.alive || net.me.su < 1) return;
-  const aim = aimFor(intent, BRAWLERS[myBrawler()].super.range);
+  const aim = aimFor(intent, BRAWLERS[myBrawler()].super);
   if (!aim) return;
   net.aimAngle = aim.angle;
   net.me.su = 0;
   send({ t: 's', x: round2(Math.cos(aim.angle)), y: round2(Math.sin(aim.angle)), d: Math.round(aim.dist), l: lead() });
   spawnLocalShots(aim.angle, aim.dist, true);
+}
+
+function tryGadget() {
+  if (!canAct() || !net.me.alive || !(net.me.gd > 0) || net.me.gcd > 0) return;
+  send({ t: 'g' });
+  net.me.gd -= 1;
+  net.me.gcd = GADGET.cooldown;
+  net.gadgetPending = { gd: net.me.gd, until: performance.now() + 600 + (net.rtt ?? 0) };
+  sfx.gadget();
 }
 
 // One-way delay to the server; it fast-forwards our shots by this much.
@@ -765,8 +862,8 @@ function spawnLocalShots(angle, dist, isSuper) {
     return;
   }
   if (kind === 'lob' || kind === 'mega') {
-    const d = clamp(dist, isSuper ? 100 : 80, spec.range);
-    net.localProjs.push({ i: `L${++localShotId}`, k: 'l', sx: x, sy: y, tx: x + Math.cos(angle) * d, ty: y + Math.sin(angle) * d, p: 0, flight: spec.flight, r: spec.blast, big: isSuper ? 1 : 0 });
+    const d = clamp(dist, spec.minRange ?? 80, spec.range);
+    net.localProjs.push({ i: `L${++localShotId}`, k: 'l', sx: x, sy: y, tx: x + Math.cos(angle) * d, ty: y + Math.sin(angle) * d, p: 0, flight: lobFlight(d), r: spec.blast, big: isSuper ? 1 : 0 });
     return;
   }
   const shots = kind === 'shotgun' ? b.pellets : kind === 'volley' ? b.super.shots : 1;
@@ -830,6 +927,17 @@ function buildView(now) {
   const latest = snaps[snaps.length - 1];
   const selfShown = net.pred ? { x: net.pred.x + net.err.x, y: net.pred.y + net.err.y } : null;
 
+  // Velocity of everyone from the two newest snapshots (for leading lobbed throws).
+  const prevSnap = snaps[snaps.length - 2];
+  const vspan = prevSnap ? latest.time - prevSnap.time : 0;
+  const velOf = (id) => {
+    const p1 = latest.pmap.get(id), p0 = prevSnap?.pmap.get(id);
+    if (!p1 || !p0 || vspan <= 0) return { vx: 0, vy: 0 };
+    let vx = (p1.x - p0.x) / vspan, vy = (p1.y - p0.y) / vspan;
+    const v = Math.hypot(vx, vy);
+    if (v > 300) { vx *= 300 / v; vy *= 300 / v; }
+    return { vx, vy };
+  };
   const players = [];
   for (const pb of b.players) {
     if (pb.i === app.myId) continue;
@@ -839,12 +947,19 @@ function buildView(now) {
       id: pb.i, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k), hp: pb.h, maxHp: pb.m, aim: pb.a, cubes: pb.c,
       bush: pb.bush, em: pb.em, dash: pb.d, brawler: info?.brawler ?? 'brick', name: info?.name ?? '', isMe: false,
       team: pb.t, gems: pb.g, stars: pb.st, weapon: pb.wp ?? 0, kx: pb.kx ?? 0, ky: pb.ky ?? 0,
+      fly: pb.d === 2 ? lerp(pa.dp ?? 0, pb.dp ?? 1, k) : 0, boost: pb.bo, ...velOf(pb.i),
     });
   }
   const selfSnap = latest.pmap.get(app.myId);
+  if (selfSnap?.d === 2 && b.pmap.get(app.myId)) {
+    // Flying off a jump pad: show the smooth server arc instead of the prediction.
+    const pb = b.pmap.get(app.myId), pa = a.pmap.get(app.myId) ?? pb;
+    net.flyShown = { x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k), fly: pb.d === 2 ? lerp(pa.dp ?? 0, pb.dp ?? 1, k) : 0 };
+  } else net.flyShown = null;
   if (selfSnap && selfShown && !net.me.ghost) {
+    const shown = net.flyShown ? { x: net.flyShown.x, y: net.flyShown.y } : selfShown;
     players.push({
-      id: app.myId, ...selfShown, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
+      id: app.myId, ...shown, fly: net.flyShown?.fly ?? 0, boost: selfSnap.bo, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
       bush: inBush(selfShown.x, selfShown.y) ? 1 : 0, em: selfSnap.em, dash: selfSnap.d, brawler: myBrawler(), name: 'You', isMe: true,
       team: selfSnap.t, gems: selfSnap.g, stars: selfSnap.st, weapon: net.me.weapon ?? 0,
       kx: net.pred?.kvx ?? 0, ky: net.pred?.kvy ?? 0,
@@ -875,6 +990,7 @@ function buildView(now) {
 
   return {
     players, ghosts, projs, cubes: lerpItems(a.cubes, b.cubes, k), crates: b.crates, haunts: b.haunts, gems: lerpItems(a.gems, b.gems, k),
+    zones: b.zones ?? [], twist: latest.twist,
     poison: lerp(a.poison, b.poison, k), latest, me: net.me, cam: net.cam, mode: latest.mode ?? 'showdown',
   };
 }
@@ -907,6 +1023,13 @@ function handleEvent(e, now) {
     case 'crateBreak': if (vol > 0) sfx.crateBreak(vol); break;
     case 'super': if (vol > 0) { sfx.super(vol); renderer.shake(6 * vol); } break;
     case 'haunt': if (vol > 0) sfx.haunt(vol); break;
+    case 'meteor': if (vol > 0) { sfx.boom(true, vol); renderer.shake(14 * vol); } break;
+    case 'drink': if (e.id === app.myId) { sfx.drink(); toast(`⚡ Energy Drink! Double damage for ${DRINK.time} s`); } else if (vol > 0.3) sfx.drink(vol * 0.5); break;
+    case 'gadget': if (e.id !== app.myId && vol > 0) sfx.gadget(vol); break;
+    case 'jump': if (vol > 0) sfx.jump(vol); break;
+    case 'land': if (vol > 0) sfx.crate(vol * 0.8); break;
+    case 'shroom': if (vol > 0.2) sfx.shroom(vol); break;
+    case 'win': net.victory = { at: now, id: e.id, team: e.team }; break;
   }
 }
 
@@ -914,18 +1037,29 @@ function onKnockout(e) {
   const feed = document.createElement('div');
   feed.textContent = e.left ? `${nameOf(e.id)} left the match`
     : e.bounty && e.by ? `${nameOf(e.by)} took ${e.bounty}⭐ from ${nameOf(e.id)}`
+    : !e.by && e.cause === 'meteor' ? `☄️ A meteor flattened ${nameOf(e.id)}`
     : !e.by ? `${nameOf(e.id)} fell to the poison`
     : e.haunt ? `👻 ${nameOf(e.by)} haunted out ${nameOf(e.id)}`
       : `${nameOf(e.by)} knocked out ${nameOf(e.id)}`;
   $('killFeed').append(feed);
   setTimeout(() => feed.remove(), 4000);
   while ($('killFeed').children.length > 4) $('killFeed').firstChild.remove();
+  // Hype callouts for real knockouts.
+  if (e.by && !e.left) {
+    const t = performance.now();
+    const streak = net.kos.filter((k) => k.by === e.by && t - k.t < 3000).length;
+    const first = net.kos.length === 0;
+    net.kos.push({ by: e.by, t });
+    const who = e.by === app.myId ? 'You' : nameOf(e.by);
+    const call = streak >= 2 ? `TRIPLE KO! ${who}` : streak === 1 ? `DOUBLE KO! ${who}` : first ? `FIRST BLOOD · ${who}` : '';
+    if (call) { net.callout = { text: call, until: t + 1600 }; if (e.by === app.myId) sfx.superReady(); }
+  }
   if (e.id === app.myId) {
     net.killedBy = e.by || null;
     if (net.view?.mode === 'showdown' && app.room?.state === 'playing') {
       const rank = (net.snaps[net.snaps.length - 1]?.alive ?? 0) + 1;
       $('koTitle').textContent = `#${rank} · Knocked out!`;
-      $('koSub').textContent = e.by ? `by ${nameOf(e.by)}` : 'by the poison';
+      $('koSub').textContent = e.by ? `by ${nameOf(e.by)}` : e.cause === 'meteor' ? 'by a meteor' : 'by the poison';
       $('koCard').classList.remove('hidden');
     }
   }
@@ -957,7 +1091,13 @@ function frame(now) {
   const meGhost = view.ghosts.find((g) => g.isMe);
   let target = me ?? meGhost;
   if (!target) target = view.players.find((p) => p.id === net.killedBy) ?? view.players[0];
-  if (me || meGhost) { net.cam.x = target.x; net.cam.y = target.y; }
+  const champ = net.victory && view.players.find((p) => p.id === net.victory.id);
+  if (champ) {
+    const k = Math.min(1, dtf * 4);
+    net.cam.x = lerp(net.cam.x, champ.x, k);
+    net.cam.y = lerp(net.cam.y, champ.y, k);
+    view.champ = champ.id;
+  } else if (me || meGhost) { net.cam.x = target.x; net.cam.y = target.y; }
   else if (target) {
     const k = Math.min(1, dtf * 6);
     net.cam.x = lerp(net.cam.x, target.x, k);
@@ -969,10 +1109,14 @@ function frame(now) {
     const ta = input.touchAim();
     const stick = sa.active ? sa : ta;
     const showAim = input.touchMode ? stick.active : true;
+    const b = BRAWLERS[me.brawler];
+    const w = weaponOf(me.brawler, net.me.weapon ?? 0);
+    input.aimReach = STICK_R * (isLob(w) ? 2.2 : 1.4);
+    input.superReach = STICK_R * (isLob(b.super) ? 2.2 : 1.4);
     if (showAim) {
-      const b = BRAWLERS[me.brawler];
-      let dist = sa.active ? b.super.range : weaponOf(me.brawler, net.me.weapon ?? 0).range;
-      if (input.touchMode) dist *= stick.frac;
+      const spec = sa.active ? b.super : w;
+      let dist = spec.range;
+      if (input.touchMode) dist = stickDist(spec, stick.frac);
       else dist = mouseAim()?.dist ?? dist;
       view.aim = { x: me.x, y: me.y, angle: net.aimAngle, dist, brawler: me.brawler, super: sa.active, weapon: net.me.weapon ?? 0 };
     }
@@ -980,6 +1124,7 @@ function frame(now) {
   if (input.touchMode && (me || meGhost)) {
     view.sticks = {
       left: input.left, right: input.right, superStick: input.superStick, ghost: !!meGhost, brawler: myBrawler(), weapon: net.me.weapon ?? 0,
+      gd: net.me.gd ?? 0, gcd: net.me.gcd ?? 0,
       hint: app.room?.state === 'playing' && (view.latest.mt < 8 || (meGhost && !input.left)),
     };
   }
@@ -1021,8 +1166,16 @@ function updateHud(view, me, meGhost, target, now) {
   } else if (now - net.fightShownAt < 900) {
     center = 'FIGHT!';
     if (net.lastBeep !== 0) { net.lastBeep = 0; sfx.beep(true); }
-  }
+  } else if (net.victory && $('results').classList.contains('hidden')) {
+    const team = net.victory.team;
+    center = team === 0 ? '🏆 Blue team wins!' : team === 1 ? '🏆 Red team wins!'
+      : net.victory.id ? `🏆 ${net.victory.id === app.myId ? 'You win!' : `${nameOf(net.victory.id)} wins!`}` : 'Draw!';
+  } else if (net.callout && now < net.callout.until) center = net.callout.text;
   $('centerMsg').textContent = center;
+  $('centerMsg').classList.toggle('callout', Boolean(net.callout && now < net.callout.until && !net.victory && center === net.callout.text));
+  const tw = MODIFIERS[snap.twist];
+  const twist = tw && (snap.state === 'countdown' || snap.mt < 5) ? `${tw.icon} ${tw.name.toUpperCase()} · ${tw.blurb}` : '';
+  if ($('twistBanner').textContent !== twist) $('twistBanner').textContent = twist;
 
   let spec = '';
   if (meGhost && app.room?.state === 'playing') {
@@ -1044,8 +1197,9 @@ function updateHud(view, me, meGhost, target, now) {
     if (spec) specEl.append(Object.assign(document.createElement('span'), { textContent: spec }));
   }
 
-  const hint = me && net.me.su >= 1 && !input.touchMode && app.room?.state === 'playing'
-    ? `⚡ ${BRAWLERS[me.brawler].super.name} ready! Press E or right-click` : '';
+  const hint = me && net.me.boost > 0 ? `⚡ ENERGY DRINK · x2 damage · ${Math.ceil(net.me.boost)}s`
+    : me && net.me.su >= 1 && !input.touchMode && app.room?.state === 'playing'
+      ? `⚡ ${BRAWLERS[me.brawler].super.name} ready! Press E or right-click` : '';
   if ($('superHint').textContent !== hint) $('superHint').textContent = hint;
 }
 
@@ -1166,6 +1320,7 @@ setInterval(() => send({ t: 'ping', ts: performance.now() }), 2000);
 renderMute();
 buildCards();
 buildModeCards();
+buildTwistCards();
 refreshAccount();
 loadArt().then((ok) => { if (ok) { buildCards(); renderLobby(); } });
 
