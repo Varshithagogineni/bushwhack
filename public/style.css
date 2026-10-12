@@ -511,3 +511,14 @@ kbd { background: var(--paper-2); border: 1px solid var(--line); border-radius: 
 @media (max-height: 520px) {
   #twistBanner { top: auto; bottom: max(78px, calc(env(safe-area-inset-bottom) + 70px)); font-size: 1rem; max-width: 52%; padding: 4px 12px; }
 }
+
+/* Ready check */
+.ready-btn { display: block; width: 100%; margin-top: 12px; }
+.ready-btn.is-ready { background: var(--teal); }
+.players .tag.ready { background: #cfeedd; color: #1d6b45; }
+.players .tag.waiting { background: rgba(0, 0, 0, 0.06); color: var(--ink-soft); }
+
+/* Blender-rendered collectible icons used inline in text */
+.ico { height: 1.2em; width: auto; vertical-align: -0.25em; display: inline-block; }
+#centerMsg .ico { height: 0.9em; vertical-align: -0.1em; }
+.mode .icon .ico { height: 1.9rem; vertical-align: 0; }

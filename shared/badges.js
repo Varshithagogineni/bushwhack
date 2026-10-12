@@ -31,7 +31,7 @@ export function emptyStats() {
     matches: 0, wins: 0, losses: 0, kills: 0, deaths: 0, supers: 0, crates: 0, gems: 0, stars: 0, hauntKOs: 0,
     streak: 0, bestStreak: 0,
     byMode: { showdown: mode(), gemgrab: mode(), bounty: mode() },
-    byBrawler: { brick: brawler(), vex: brawler(), boom: brawler() },
+    byBrawler: { brick: brawler(), vex: brawler(), boom: brawler(), melo: brawler(), kit: brawler(), tink: brawler() },
   };
 }
 

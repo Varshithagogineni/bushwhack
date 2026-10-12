@@ -114,8 +114,43 @@ export const BRAWLERS = {
     super: { kind: 'mega', name: 'Mega Bomb', desc: 'A huge bomb with a massive blast', range: 600, minRange: 100, damage: 2300, blast: 140, falloff: 0.4, charge: 2800 },
     stats: { health: 3, range: 4, damage: 4 },
   },
+  melo: {
+    name: 'Melo', role: 'Support', color: '#6f9a5a', dark: '#46653a',
+    desc: 'Wandering lute player. Wide sound waves hit everyone in front; songs heal.',
+    hp: 3600, speed: 245, reload: 1.45,
+    weapon: 'Sound Wave', icon: '🎵',
+    attack: 'wave', range: 420, pellets: 7, spread: 1.0, damage: 820, projSpeed: 950, knock: 60,
+    alt: { weapon: 'Tuning Fork', icon: '🎼', attack: 'bullet', range: 620, damage: 820, projSpeed: 1400, knock: 80, reload: 1.2 },
+    gadget: { name: 'Encore', icon: '🔁', desc: 'Instantly refill all your ammo' },
+    super: { kind: 'heal', name: 'Healing Chorus', desc: 'Heal yourself and nearby teammates', range: 300, heal: 2600, charge: 2600 },
+    stats: { health: 3, range: 3, damage: 2 },
+  },
+  kit: {
+    name: 'Kit', role: 'Assassin', color: '#3a3550', dark: '#24202f',
+    desc: 'Hooded shadow with twin kama. Dashes in, slices, leaps away.',
+    hp: 3300, speed: 280, reload: 1.1,
+    weapon: 'Kama Dash', icon: '🌙',
+    attack: 'lunge', range: 190, damage: 1150, dashSpeed: 1500, knock: 220,
+    alt: { weapon: 'Twin Kunai', icon: '🗡️', attack: 'shotgun', pellets: 2, spread: 0.14, range: 380, damage: 520, projSpeed: 1600, knock: 40 },
+    gadget: { name: 'Smoke Cloak', icon: '🌀', desc: 'Turn invisible for 3 seconds', time: 3 },
+    super: { kind: 'leap', name: 'Shadow Leap', desc: 'Leap over walls and slam down on enemies', range: 520, minRange: 120, damage: 1500, blast: 120, charge: 2400 },
+    stats: { health: 2, range: 1, damage: 4 },
+  },
+  tink: {
+    name: 'Tink', role: 'Builder', color: '#d08a3a', dark: '#8f5a20',
+    desc: 'Tinkerer with a spark orb that bounces between enemies. Builds a turret.',
+    hp: 3100, speed: 245, reload: 1.3,
+    weapon: 'Spark Orb', icon: '⚡',
+    attack: 'bounce', range: 560, damage: 980, projSpeed: 1100, bounces: 2, chainRange: 300, knock: 60,
+    alt: { weapon: 'Rivet Gun', icon: '🔩', attack: 'bullet', range: 500, damage: 560, projSpeed: 1600, knock: 30, reload: 0.75 },
+    gadget: { name: 'Shock Pulse', icon: '💥', desc: 'Zap and push back enemies around you', damage: 800, radius: 170, knock: 420 },
+    super: { kind: 'turret', name: 'Spark Turret', desc: 'Build a turret that shoots nearby enemies', range: 300, minRange: 60, charge: 2800 },
+    stats: { health: 2, range: 4, damage: 3 },
+  },
 };
 export const BRAWLER_IDS = Object.keys(BRAWLERS);
+// Tink's turret.
+export const TURRET = { hp: 3000, life: 20, every: 0.8, damage: 420, range: 480, projSpeed: 1200 };
 
 // The stats of the weapon a brawler currently holds (0 = main, 1 = alt). Health, speed and Super never change.
 export function weaponOf(id, slot) {

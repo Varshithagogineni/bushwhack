@@ -1,7 +1,7 @@
 import {
   DT, BRAWLERS, BRAWLER_IDS, MAX_AMMO, MIN_PLAYERS, MAX_PLAYERS, CENTER, POISON, HAUNT, EMOTES, MODES, MODE_IDS,
   movePlayer, moveGhost, speedFactor, round2, inBush, isWallAt, clamp, PLAYER_RADIUS, weaponOf, SWAP_TIME,
-  lobFlight, MODIFIERS, MODIFIER_IDS, GADGET, DRINK,
+  lobFlight, MODIFIERS, MODIFIER_IDS, GADGET, DRINK, hasLineOfSight,
 } from '/shared/game.js';
 import { BADGES } from '/shared/badges.js';
 import { Input, STICK_R } from './input.js';
@@ -11,6 +11,17 @@ import { sfx, isMuted, setMuted, setGameAudio } from './sfx.js';
 import { hostRoom, joinRoom } from './net/p2p.js';
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
+// Blender-rendered icons for collectibles (gems, stars, power cubes, drinks, trophies) instead of emoji.
+const icon = (n) => `<img class="ico" src="/assets/icons/${n}.png" alt="">`;
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const MODE_ICON = { gemgrab: 'gem', bounty: 'star' };
+const modeIcon = (id) => (MODE_ICON[id] ? icon(MODE_ICON[id]) : esc(MODES[id]?.icon ?? ''));
+// innerHTML, but only when it changed (the HUD updates every frame).
+function setHtml(el, html) {
+  if (el.dataset.html === html) return;
+  el.dataset.html = html;
+  el.innerHTML = html;
+}
 const INTERP_MS = 80; // render other players this far in the past so motion stays smooth
 const CLIENT_COOLDOWN = 0.45;
 const VICTORY_MS = 1900; // winner spotlight before the results card
@@ -82,7 +93,7 @@ function renderAccount() {
   $('guestBar').classList.toggle('hidden', Boolean(p));
   $('userBar').classList.toggle('hidden', !p);
   $('nameField').classList.toggle('hidden', Boolean(p));
-  if (p) $('userChip').textContent = `👤 ${p.username} · 🏆 ${p.trophies}`;
+  if (p) $('userChip').innerHTML = `👤 ${esc(p.username)} · ${icon('trophy')} ${p.trophies}`;
 }
 
 let authMode = 'login';
@@ -106,10 +117,10 @@ async function openProfile() {
   try { renderLeaderboard(await rpc('bw_leaderboard')); } catch { /* offline: skip */ }
 }
 
-function tile(label, value) {
+function tile(label, value, html = false) {
   const d = document.createElement('div');
   d.className = 'stat-tile';
-  d.append(Object.assign(document.createElement('b'), { textContent: value }), Object.assign(document.createElement('span'), { textContent: label }));
+  d.append(Object.assign(document.createElement('b'), { textContent: value }), Object.assign(document.createElement('span'), html ? { innerHTML: label } : { textContent: label }));
   return d;
 }
 
@@ -122,11 +133,11 @@ function renderProfile(p) {
   $('pStats').replaceChildren(
     tile('Matches', s.matches), tile('Wins', s.wins), tile('Losses', s.losses), tile('Win rate', `${rate}%`),
     tile('Knockouts', s.kills), tile('Best streak', s.bestStreak),
-    tile(`${MODES.showdown.icon} Showdown wins`, s.byMode.showdown.wins), tile(`${MODES.gemgrab.icon} Gem Grab wins`, s.byMode.gemgrab.wins),
-    tile(`${MODES.bounty.icon} Bounty wins`, s.byMode.bounty.wins), tile('Gems carried', s.gems), tile('Stars stolen', s.stars), tile('Supers used', s.supers),
+    tile(`${MODES.showdown.icon} Showdown wins`, s.byMode.showdown.wins), tile(`${modeIcon('gemgrab')} Gem Grab wins`, s.byMode.gemgrab.wins, true),
+    tile(`${modeIcon('bounty')} Bounty wins`, s.byMode.bounty.wins, true), tile(`${icon('gem')} Gems carried`, s.gems, true), tile(`${icon('star')} Stars stolen`, s.stars, true), tile('Supers used', s.supers),
   );
   $('pBrawlers').replaceChildren(...BRAWLER_IDS.map((id) => {
-    const b = s.byBrawler[id];
+    const b = s.byBrawler?.[id] ?? { wins: 0, played: 0, kills: 0 };
     const d = document.createElement('div');
     d.className = 'brawler-stat';
     d.style.boxShadow = `inset 0 4px 0 ${BRAWLERS[id].color}`;
@@ -165,7 +176,7 @@ function renderLeaderboard(top) {
     li.append(
       Object.assign(document.createElement('span'), { className: 'pos', textContent: `#${i + 1}` }),
       Object.assign(document.createElement('span'), { className: 'who', textContent: row.username }),
-      Object.assign(document.createElement('span'), { textContent: `🏆 ${row.trophies}` }),
+      Object.assign(document.createElement('span'), { innerHTML: `${icon('trophy')} ${row.trophies}` }),
     );
     return li;
   }));
@@ -178,7 +189,7 @@ function renderProgress() {
   if (!pr) return;
   const delta = Object.assign(document.createElement('div'), {
     className: `delta ${pr.delta > 0 ? 'up' : pr.delta < 0 ? 'down' : ''}`,
-    textContent: `${pr.delta > 0 ? '+' : ''}${pr.delta} 🏆 · ${pr.trophies} total`,
+    innerHTML: `${pr.delta > 0 ? '+' : ''}${pr.delta} ${icon('trophy')} · ${pr.trophies} total`,
   });
   box.replaceChildren(delta, ...pr.newBadges.map((b) => Object.assign(document.createElement('div'), {
     className: 'newbadge', textContent: `New badge secured: ${b.icon} ${b.name}`,
@@ -428,7 +439,7 @@ function buildCards() {
     card.append(el('desc super-desc', `Weapons: ${b.icon} ${b.weapon} ⇄ ${b.alt.icon} ${b.alt.weapon}`));
     card.addEventListener('click', () => {
       const me = playerById(app.myId);
-      if (me) me.brawler = id;
+      if (me) { me.brawler = id; if (me.ready && me.id !== app.room?.hostId) { me.ready = false; send({ t: 'ready', on: false }); } }
       send({ t: 'pick', brawler: id });
       renderLobby();
     });
@@ -460,7 +471,9 @@ function buildModeCards() {
     card.className = 'mode';
     card.dataset.id = id;
     const el = (cls, text) => Object.assign(document.createElement('div'), { className: cls, textContent: text });
-    card.append(el('icon', m.icon), el('name', m.name), el('blurb', m.blurb));
+    const ic = el('icon', '');
+    ic.innerHTML = modeIcon(id);
+    card.append(ic, el('name', m.name), el('blurb', m.blurb));
     card.addEventListener('click', () => send({ t: 'mode', mode: id }));
     wrap.append(card);
   }
@@ -470,12 +483,14 @@ function buildTwistCards() {
   const wrap = $('twistCards');
   wrap.innerHTML = '';
   const opts = [['random', '🎲', 'Surprise me', 'A random twist every match'], ...MODIFIER_IDS.map((id) => [id, MODIFIERS[id].icon, MODIFIERS[id].name, MODIFIERS[id].blurb]), ['off', '🚫', 'No twist', 'Classic rules']];
-  for (const [id, icon, name, blurb] of opts) {
+  for (const [id, emoji, name, blurb] of opts) {
     const card = document.createElement('button');
     card.className = 'mode twist';
     card.dataset.id = id;
     const el = (cls, text) => Object.assign(document.createElement('div'), { className: cls, textContent: text });
-    card.append(el('icon', icon), el('name', name), el('blurb', blurb));
+    const ic = el('icon', '');
+    ic.innerHTML = id === 'drink' ? icon('drink') : esc(emoji);
+    card.append(ic, el('name', name), el('blurb', blurb));
     card.addEventListener('click', () => send({ t: 'twist', twist: id }));
     wrap.append(card);
   }
@@ -492,10 +507,11 @@ function playerRow(p, room) {
   who.textContent = `${p.name} · ${BRAWLERS[p.brawler].name}`;
   li.append(dot, who);
   const tag = (text, cls) => li.append(Object.assign(document.createElement('span'), { className: `tag ${cls}`, textContent: text }));
-  if (p.trophies != null) tag(`🏆 ${p.trophies}`, 'wins');
+  if (p.trophies != null) li.append(Object.assign(document.createElement('span'), { className: 'tag wins', innerHTML: `${icon('trophy')} ${p.trophies}` }));
   if (p.wins) tag(`${p.wins}W`, '');
   if (p.id === app.myId) tag('YOU', 'you');
   if (p.id === room.hostId) tag('HOST', 'host');
+  else if (!p.bot && p.connected) tag(p.ready ? '✔ READY' : 'picking…', p.ready ? 'ready' : 'waiting');
   if (!p.connected && !p.bot) tag('offline', '');
   return li;
 }
@@ -562,14 +578,20 @@ function renderLobby() {
   $('matchBanner').textContent = banner;
   $('matchBanner').classList.toggle('hidden', !banner);
   $('hostControls').classList.toggle('hidden', !isHost);
-  $('startBtn').disabled = inPlay || room.players.length < MIN_PLAYERS;
-  $('startBtn').textContent = `Play ${mode.name}`;
+  const waiting = room.players.filter((p) => !p.bot && p.connected && p.id !== room.hostId && !p.ready);
+  $('startBtn').disabled = inPlay || room.players.length < MIN_PLAYERS || waiting.length > 0;
+  $('startBtn').textContent = waiting.length ? `Waiting for ${waiting.length} player${waiting.length > 1 ? 's' : ''}…` : `Play ${mode.name}`;
+  const meRow = playerById(app.myId);
+  $('readyBtn').classList.toggle('hidden', isHost || inPlay || !meRow);
+  $('readyBtn').classList.toggle('is-ready', Boolean(meRow?.ready));
+  $('readyBtn').textContent = meRow?.ready ? `✔ Ready as ${BRAWLERS[mine].name} (tap to change)` : `Ready with ${BRAWLERS[mine].name}!`;
   $('addBotBtn').disabled = room.players.length >= MAX_PLAYERS;
   $('removeBotBtn').disabled = !room.players.some((p) => p.bot);
   const host = playerById(room.hostId);
   $('lobbyStatus').textContent = isHost
-    ? room.players.length < MIN_PLAYERS ? 'Share the code, or add a bot to play right away.' : 'Everyone ready? Hit Play.'
-    : `Waiting for ${host?.name ?? 'the host'} to start the match…`;
+    ? room.players.length < MIN_PLAYERS ? 'Share the code, or add a bot to play right away.'
+      : waiting.length ? `${waiting.map((p) => p.name).join(', ')} still picking a brawler…` : 'Everyone is ready. Hit Play!'
+    : !meRow?.ready ? 'Pick your brawler above, then tap Ready.' : `Waiting for ${host?.name ?? 'the host'} to start the match…`;
 }
 
 function renderResults() {
@@ -581,13 +603,13 @@ function renderResults() {
   const winner = room.results.find((r) => r.won);
   const teamName = (t) => (t === 0 ? 'Blue team' : 'Red team');
   if (MODES[room.mode]?.teams) {
-    $('resultTitle').textContent = room.winnerTeam == null ? 'Draw!' : mine?.won ? '🏆 Victory!' : 'Defeat';
+    $('resultTitle').innerHTML = room.winnerTeam == null ? 'Draw!' : mine?.won ? `${icon('trophy')} Victory!` : 'Defeat';
     $('resultSub').textContent = room.winnerTeam == null ? 'Both teams held the same number of gems.' : `${teamName(room.winnerTeam)} wins Gem Grab`;
   } else {
-    $('resultTitle').textContent = !mine ? 'Match over' : mine.won ? '🏆 Victory!' : `#${mine.rank} place`;
-    $('resultSub').textContent = !winner ? 'Nobody won this one!'
-      : room.mode === 'bounty' ? `${winner.id === app.myId ? 'You' : winner.name} collected the most stars (${winner.score}⭐)`
-        : `${winner.id === app.myId ? 'You' : winner.name} won as ${BRAWLERS[winner.brawler].name}`;
+    $('resultTitle').innerHTML = !mine ? 'Match over' : mine.won ? `${icon('trophy')} Victory!` : `#${mine.rank} place`;
+    $('resultSub').innerHTML = !winner ? 'Nobody won this one!'
+      : room.mode === 'bounty' ? `${winner.id === app.myId ? 'You' : esc(winner.name)} collected the most stars (${winner.score} ${icon('star')})`
+        : `${winner.id === app.myId ? 'You' : esc(winner.name)} won as ${BRAWLERS[winner.brawler].name}`;
   }
   const mvp = room.results.find((r) => r.mvp);
   const mvpBox = $('mvp');
@@ -607,7 +629,9 @@ function renderResults() {
       t.append(el('b', '', String(val)), el('span', '', label));
       stats.append(t);
     }
-    info.append(el('div', 'mvp-ribbon', '⭐ MVP'), el('div', 'mvp-name', mvp.id === app.myId ? `${mvp.name} (you!)` : mvp.name), stats);
+    const ribbon = el('div', 'mvp-ribbon', '');
+    ribbon.innerHTML = `${icon('star')} MVP`;
+    info.append(ribbon, el('div', 'mvp-name', mvp.id === app.myId ? `${mvp.name} (you!)` : mvp.name), stats);
     mvpBox.append(pic, info);
   }
   const list = $('resultList');
@@ -621,8 +645,10 @@ function renderResults() {
     dot.style.cssText = `width:18px;height:18px;border-radius:50%;flex:none;background:${BRAWLERS[r.brawler].color};${teams ? `box-shadow:0 0 0 3px ${r.team === 0 ? '#4aa3ff' : '#ff4d4f'}` : ''}`;
     li.append(
       span('rank', `#${r.rank}`), dot, span('who', r.id === app.myId ? `${r.name} (you)` : r.name),
-      span('muted', room.mode === 'bounty' ? `${r.score}⭐` : `${r.kills} KO${r.kills === 1 ? '' : 's'}`), span('wins', `🏆 ${r.wins}`),
+      span('muted', room.mode === 'bounty' ? `${r.score}` : `${r.kills} KO${r.kills === 1 ? '' : 's'}`), span('wins', ''),
     );
+    if (room.mode === 'bounty') li.children[3].insertAdjacentHTML('beforeend', ` ${icon('star')}`);
+    li.lastChild.innerHTML = `${icon('trophy')} ${r.wins}`;
     list.append(li);
   }
   const isHost = room.hostId === app.myId;
@@ -730,9 +756,21 @@ function mouseAim() {
   return { angle: Math.atan2(input.mouse.y - s.y, input.mouse.x - s.x), dist: Math.hypot(input.mouse.x - s.x, input.mouse.y - s.y) / renderer.scale };
 }
 
+// Phone sticks live on the screen, but the 3D camera is tilted, so a direction on the screen isn't the same
+// angle on the ground (diagonals were off by up to ~7°). Project the stick direction onto the ground
+// around your brawler so shots go exactly where your thumb (and the aim guide) points.
+function stickToWorld(angle) {
+  if (!renderer.groundPoint || !net.pred) return angle;
+  const s = selfScreenPos();
+  if (!s) return angle;
+  const g = renderer.groundPoint(s.x + Math.cos(angle) * 120, s.y + Math.sin(angle) * 120);
+  if (!g) return angle;
+  return Math.atan2(g.y - (net.pred.y + net.err.y), g.x - (net.pred.x + net.err.x));
+}
+
 function updateAim(mx, my) {
   const ta = input.superAim().active ? input.superAim() : input.touchAim();
-  if (ta.active) net.aimAngle = ta.angle;
+  if (ta.active) net.aimAngle = stickToWorld(ta.angle);
   else if (!input.touchMode) {
     const m = mouseAim();
     if (m) net.aimAngle = m.angle;
@@ -740,7 +778,8 @@ function updateAim(mx, my) {
 }
 
 // Turn a fire intent (mouse, drag, or auto-aim tap) into an angle and distance.
-const isLob = (spec) => spec.attack === 'lob' || spec.kind === 'mega';
+// Attacks aimed at a spot on the ground (lobbed bombs, leaps, turret placement) rather than a direction.
+const isLob = (spec) => spec.attack === 'lob' || spec.kind === 'mega' || spec.kind === 'leap' || spec.kind === 'turret';
 const enemies = () => {
   const teams = MODES[net.view?.mode]?.teams;
   return (net.view?.players ?? []).filter((p) => !p.isMe && !(teams && p.team === net.me.team));
@@ -756,6 +795,11 @@ function leadTarget(t, from) {
   if (isWallAt(px, py)) { px = (px + t.x) / 2; py = (py + t.y) / 2; }
   return { x: px, y: py };
 }
+function leadShot(t, from, speed) {
+  const ft = Math.hypot(t.x - from.x, t.y - from.y) / speed;
+  const px = t.x + (t.vx || 0) * ft * 0.8, py = t.y + (t.vy || 0) * ft * 0.8;
+  return isWallAt(px, py) ? t : { x: px, y: py };
+}
 // Phone aim stick -> throw distance. Throwers get the whole stick for [minRange, range], so short throws are precise.
 const stickDist = (spec, frac) => (isLob(spec) ? (spec.minRange ?? 0) + frac * (spec.range - (spec.minRange ?? 0)) : frac * spec.range);
 
@@ -764,18 +808,22 @@ function aimFor(intent, spec) {
   const range = spec.range, lob = isLob(spec);
   let angle = net.aimAngle, dist = range;
   if (intent.auto) {
-    let best = null, bd = range;
+    // Nearest enemy, preferring ones a straight shot can actually reach (lobs fly over walls).
+    let best = null, bd = Infinity;
     for (const p of enemies()) {
       const d = Math.hypot(p.x - me.x, p.y - me.y);
-      if (d < bd) { bd = d; best = p; }
+      if (d > range) continue;
+      const score = d + (!lob && !hasLineOfSight(me.x, me.y, p.x, p.y) ? 10000 : 0);
+      if (score < bd) { bd = score; best = p; }
     }
     if (best) {
-      const t = lob ? leadTarget(best, me) : best;
+      // Lead moving targets: lobs by their flight time, bullets by travel time.
+      const t = lob ? leadTarget(best, me) : spec.projSpeed ? leadShot(best, me, spec.projSpeed) : best;
       angle = Math.atan2(t.y - me.y, t.x - me.x);
       dist = Math.min(range, Math.hypot(t.x - me.x, t.y - me.y));
     } else if (lob) dist = Math.min(300, range); // nobody close: a mid-range throw, never a full-length lob
   } else if (intent.angle != null) {
-    angle = intent.angle;
+    angle = stickToWorld(intent.angle);
     dist = stickDist(spec, intent.frac);
     if (lob) {
       // Gentle magnet: a throw landing right next to an enemy snaps onto them (leading if they move).
@@ -862,7 +910,7 @@ function spawnLocalShots(angle, dist, isSuper) {
   const spec = isSuper ? b.super : b;
   const kind = isSuper ? b.super.kind : b.attack;
   const { x, y } = net.pred;
-  if (kind === 'charge') return;
+  if (kind === 'charge' || kind === 'lunge' || kind === 'heal' || kind === 'leap' || kind === 'turret') return; // the host moves/spawns these
   if (kind === 'melee') {
     renderer.addEvent({ k: 'melee', id: app.myId, x, y, a: angle }, performance.now());
     return;
@@ -872,15 +920,15 @@ function spawnLocalShots(angle, dist, isSuper) {
     net.localProjs.push({ i: `L${++localShotId}`, k: 'l', sx: x, sy: y, tx: x + Math.cos(angle) * d, ty: y + Math.sin(angle) * d, p: 0, flight: lobFlight(d), r: spec.blast, big: isSuper ? 1 : 0 });
     return;
   }
-  const shots = kind === 'shotgun' ? b.pellets : kind === 'volley' ? b.super.shots : 1;
-  const spread = kind === 'shotgun' ? b.spread : kind === 'volley' ? b.super.spread : 0;
+  const shots = kind === 'shotgun' || kind === 'wave' ? b.pellets : kind === 'volley' ? b.super.shots : 1;
+  const spread = kind === 'shotgun' || kind === 'wave' ? b.spread : kind === 'volley' ? b.super.spread : 0;
   for (let i = 0; i < shots; i++) {
     const a = angle + (shots > 1 ? (i / (shots - 1) - 0.5) * spread : 0);
     net.localProjs.push({
-      i: `L${++localShotId}`, k: kind === 'shotgun' ? 'p' : kind === 'volley' ? 'v' : spec.hitR ? 'o' : 'b',
+      i: `L${++localShotId}`, k: kind === 'shotgun' ? 'p' : kind === 'volley' ? 'v' : kind === 'wave' ? 'w' : kind === 'bounce' ? 'j' : spec.hitR ? 'o' : 'b',
       x: x + Math.cos(a) * (PLAYER_RADIUS + 4), y: y + Math.sin(a) * (PLAYER_RADIUS + 4),
       vx: Math.cos(a) * spec.projSpeed, vy: Math.sin(a) * spec.projSpeed, travelled: 0, range: spec.range,
-      pierce: kind === 'volley' || Boolean(spec.pierce), hitR: PLAYER_RADIUS + (spec.hitR || 10),
+      pierce: kind === 'volley' || kind === 'wave' || Boolean(spec.pierce), hitR: PLAYER_RADIUS + (spec.hitR || 10),
     });
   }
 }
@@ -953,7 +1001,7 @@ function buildView(now) {
       id: pb.i, x: lerp(pa.x, pb.x, k), y: lerp(pa.y, pb.y, k), hp: pb.h, maxHp: pb.m, aim: pb.a, cubes: pb.c,
       bush: pb.bush, em: pb.em, dash: pb.d, brawler: info?.brawler ?? 'brick', name: info?.name ?? '', isMe: false,
       team: pb.t, gems: pb.g, stars: pb.st, weapon: pb.wp ?? 0, kx: pb.kx ?? 0, ky: pb.ky ?? 0,
-      fly: pb.d === 2 ? lerp(pa.dp ?? 0, pb.dp ?? 1, k) : 0, boost: pb.bo, ...velOf(pb.i),
+      fly: pb.d === 2 ? lerp(pa.dp ?? 0, pb.dp ?? 1, k) : 0, boost: pb.bo, cloak: pb.ck, ...velOf(pb.i),
     });
   }
   const selfSnap = latest.pmap.get(app.myId);
@@ -965,7 +1013,7 @@ function buildView(now) {
   if (selfSnap && selfShown && !net.me.ghost) {
     const shown = net.flyShown ? { x: net.flyShown.x, y: net.flyShown.y } : selfShown;
     players.push({
-      id: app.myId, ...shown, fly: net.flyShown?.fly ?? 0, boost: selfSnap.bo, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
+      id: app.myId, ...shown, fly: net.flyShown?.fly ?? 0, boost: selfSnap.bo, cloak: selfSnap.ck, hp: selfSnap.h, maxHp: selfSnap.m, aim: net.aimAngle, cubes: selfSnap.c,
       bush: inBush(selfShown.x, selfShown.y) ? 1 : 0, em: selfSnap.em, dash: selfSnap.d, brawler: myBrawler(), name: 'You', isMe: true,
       team: selfSnap.t, gems: selfSnap.g, stars: selfSnap.st, weapon: net.me.weapon ?? 0,
       kx: net.pred?.kvx ?? 0, ky: net.pred?.kvy ?? 0,
@@ -996,7 +1044,7 @@ function buildView(now) {
 
   return {
     players, ghosts, projs, cubes: lerpItems(a.cubes, b.cubes, k), crates: b.crates, haunts: b.haunts, gems: lerpItems(a.gems, b.gems, k),
-    zones: b.zones ?? [], twist: latest.twist,
+    zones: b.zones ?? [], twist: latest.twist, turrets: b.turrets ?? [],
     poison: lerp(a.poison, b.poison, k), latest, me: net.me, cam: net.cam, mode: latest.mode ?? 'showdown',
   };
 }
@@ -1041,13 +1089,18 @@ function handleEvent(e, now) {
     case 'land': if (vol > 0) sfx.crate(vol * 0.8); break;
     case 'shroom': if (vol > 0.2) sfx.shroom(vol); break;
     case 'win': net.victory = { at: now, id: e.id, team: e.team }; break;
+    case 'chorus': if (vol > 0) sfx.chorus(vol); break;
+    case 'heal': if (e.id === app.myId) sfx.shroom(); break;
+    case 'zap': case 'shock': if (vol > 0) sfx.zap(vol); if (e.k === 'shock') renderer.shake(6 * vol, e.x, e.y); break;
+    case 'build': if (vol > 0) sfx.build(vol); break;
+    case 'tshot': if (vol > 0.2) sfx.shot('bullet', vol * 0.5); break;
   }
 }
 
 function onKnockout(e) {
   const feed = document.createElement('div');
-  feed.textContent = e.left ? `${nameOf(e.id)} left the match`
-    : e.bounty && e.by ? `${nameOf(e.by)} took ${e.bounty}⭐ from ${nameOf(e.id)}`
+  if (e.bounty && e.by && !e.left) feed.innerHTML = `${esc(nameOf(e.by))} took ${e.bounty} ${icon('star')} from ${esc(nameOf(e.id))}`;
+  else feed.textContent = e.left ? `${nameOf(e.id)} left the match`
     : !e.by && e.cause === 'meteor' ? `☄️ A meteor flattened ${nameOf(e.id)}`
     : !e.by ? `${nameOf(e.id)} fell to the poison`
     : e.haunt ? `👻 ${nameOf(e.by)} haunted out ${nameOf(e.id)}`
@@ -1152,21 +1205,21 @@ function updateHud(view, me, meGhost, target, now) {
   if (view.mode === 'gemgrab') {
     const [blue, red] = snap.tg ?? [0, 0];
     const mine = net.me.team ?? 0;
-    left.textContent = `💎 Blue${mine === 0 ? ' (you)' : ''} ${blue} · ${red} Red${mine === 1 ? ' (you)' : ''}`;
-    right.textContent = snap.gcd ? `${snap.gcd.team === mine ? '🏆 Your team' : '⚠ Enemy'} wins in ${snap.gcd.left}` : `⏱ ${clock(snap.left ?? 0)}`;
+    setHtml(left, `${icon('gem')} Blue${mine === 0 ? ' (you)' : ''} ${blue} · ${red} Red${mine === 1 ? ' (you)' : ''}`);
+    setHtml(right, snap.gcd ? `${snap.gcd.team === mine ? `${icon('trophy')} Your team` : '⚠ Enemy'} wins in ${snap.gcd.left}` : `⏱ ${clock(snap.left ?? 0)}`);
     right.classList.toggle('danger', Boolean(snap.gcd && snap.gcd.team !== mine));
   } else if (view.mode === 'bounty') {
     const scores = snap.scores ?? [];
     const best = scores.reduce((a, s) => (s[1] > (a?.[1] ?? -1) ? s : a), null);
     const mineScore = scores.find((s) => s[0] === app.myId)?.[1] ?? 0;
-    left.textContent = `⭐ You ${mineScore}${best && best[0] !== app.myId ? ` · ${nameOf(best[0])} ${best[1]}` : ' · leading!'}`;
-    right.textContent = `⏱ ${clock(snap.left ?? 0)}`;
+    setHtml(left, `${icon('star')} You ${mineScore}${best && best[0] !== app.myId ? ` · ${esc(nameOf(best[0]))} ${best[1]}` : ' · leading!'}`);
+    setHtml(right, `⏱ ${clock(snap.left ?? 0)}`);
   } else {
-    left.textContent = `👥 ${snap.alive} left`;
+    setHtml(left, `👥 ${snap.alive} left`);
     const untilPoison = Math.ceil(POISON.start - snap.mt);
     const outside = me && Math.hypot(me.x - CENTER, me.y - CENTER) > view.poison;
     right.classList.toggle('danger', !!outside);
-    right.textContent = outside ? '☠ Get out of the poison!' : untilPoison > 0 ? `☠ Poison in ${untilPoison}s` : '☠ Poison closing in';
+    setHtml(right, outside ? '☠ Get out of the poison!' : untilPoison > 0 ? `☠ Poison in ${untilPoison}s` : '☠ Poison closing in');
   }
 
   let center = '';
@@ -1179,14 +1232,14 @@ function updateHud(view, me, meGhost, target, now) {
     if (net.lastBeep !== 0) { net.lastBeep = 0; sfx.beep(true); }
   } else if (net.victory && $('results').classList.contains('hidden')) {
     const team = net.victory.team;
-    center = team === 0 ? '🏆 Blue team wins!' : team === 1 ? '🏆 Red team wins!'
-      : net.victory.id ? `🏆 ${net.victory.id === app.myId ? 'You win!' : `${nameOf(net.victory.id)} wins!`}` : 'Draw!';
-  } else if (net.callout && now < net.callout.until) center = net.callout.text;
-  $('centerMsg').textContent = center;
-  $('centerMsg').classList.toggle('callout', Boolean(net.callout && now < net.callout.until && !net.victory && center === net.callout.text));
+    center = team === 0 ? `${icon('trophy')} Blue team wins!` : team === 1 ? `${icon('trophy')} Red team wins!`
+      : net.victory.id ? `${icon('trophy')} ${net.victory.id === app.myId ? 'You win!' : `${esc(nameOf(net.victory.id))} wins!`}` : 'Draw!';
+  } else if (net.callout && now < net.callout.until) center = esc(net.callout.text);
+  setHtml($('centerMsg'), center);
+  $('centerMsg').classList.toggle('callout', Boolean(net.callout && now < net.callout.until && !net.victory && center === esc(net.callout.text)));
   const tw = MODIFIERS[snap.twist];
-  const twist = tw && (snap.state === 'countdown' || snap.mt < 5) ? `${tw.icon} ${tw.name.toUpperCase()} · ${tw.blurb}` : '';
-  if ($('twistBanner').textContent !== twist) $('twistBanner').textContent = twist;
+  const twist = tw && (snap.state === 'countdown' || snap.mt < 5) ? `${snap.twist === 'drink' ? icon('drink') : tw.icon} ${tw.name.toUpperCase()} · ${tw.blurb}` : '';
+  setHtml($('twistBanner'), twist);
 
   let spec = '';
   if (meGhost && app.room?.state === 'playing') {
@@ -1208,10 +1261,10 @@ function updateHud(view, me, meGhost, target, now) {
     if (spec) specEl.append(Object.assign(document.createElement('span'), { textContent: spec }));
   }
 
-  const hint = me && net.me.boost > 0 ? `⚡ ENERGY DRINK · x2 damage · ${Math.ceil(net.me.boost)}s`
+  const hint = me && net.me.boost > 0 ? `${icon('drink')} ENERGY DRINK · x2 damage · ${Math.ceil(net.me.boost)}s`
     : me && net.me.su >= 1 && !input.touchMode && app.room?.state === 'playing'
       ? `⚡ ${BRAWLERS[me.brawler].super.name} ready! Press E or right-click` : '';
-  if ($('superHint').textContent !== hint) $('superHint').textContent = hint;
+  setHtml($('superHint'), hint);
 }
 
 // ---------- UI wiring ----------
@@ -1247,6 +1300,14 @@ $('joinForm').addEventListener('submit', (e) => {
 });
 $('codeInput').addEventListener('input', (e) => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); });
 $('addBotBtn').addEventListener('click', () => send({ t: 'addBot' }));
+$('readyBtn').addEventListener('click', () => {
+  const me = playerById(app.myId);
+  if (!me) return;
+  me.ready = !me.ready;
+  send({ t: 'ready', on: me.ready });
+  if (me.ready) sfx.emote();
+  renderLobby();
+});
 $('removeBotBtn').addEventListener('click', () => send({ t: 'removeBot' }));
 $('startBtn').addEventListener('click', () => {
   if (app.room?.state === 'ended') send({ t: 'lobby' }); // skip the rest of the results screen

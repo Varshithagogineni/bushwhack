@@ -4,7 +4,7 @@ import {
   COUNTDOWN, POISON, HAUNT, EMOTES, BRAWLERS, BRAWLER_IDS, MODES, RESPAWN_TIME, GEM, clamp, isWallAt, inBush,
   resolveWalls, resolveCircles, movePlayer, moveGhost, speedFactor, hasLineOfSight, poisonRadius, nearestFloor,
   spawnPoints, teamSpawn, teamBase, crateSpots, round2, KB, ITEM, SWAP_TIME, weaponOf, moveItem, itemSettled,
-  lobFlight, blastDamage, MODIFIERS, MODIFIER_IDS, METEOR, DRINK, SHROOM, GADGET, JUMP, JUMP_PADS, tileAt,
+  lobFlight, blastDamage, MODIFIERS, MODIFIER_IDS, METEOR, DRINK, SHROOM, GADGET, JUMP, JUMP_PADS, tileAt, TURRET,
 } from './game.js';
 
 const RECONNECT_GRACE_MS = 30_000;
@@ -28,6 +28,7 @@ export class Room {
     this.modSetting = 'random'; // host's Match Twist choice: 'random', 'off' or a MODIFIERS id
     this.modifier = null; // the twist in play this match
     this.zones = []; // meteor warnings ('m') and healing rings ('h')
+    this.turrets = []; // Tink's turrets
     this.state = 'lobby'; // lobby | countdown | playing | ended
     this.time = 0; // sim seconds since match start (incl. countdown)
     this.matchTime = 0; // seconds since the fight began
@@ -84,7 +85,7 @@ export class Room {
       superCharge: 0, dash: null, hauntCd: 0, hauntAcc: 0, emote: -1, emoteUntil: 0, emoteCd: 0,
       cubes: 0, kills: 0, rank: 0, aim: 0, inputs: [], ack: 0, lastHurt: -99, lastAttack: -99,
       revealUntil: -99, poisonAcc: 0, ai: null, gems: 0, stars: 2, score: 0, respawnAt: 0, account: null,
-      kvx: 0, kvy: 0, weapon: 0, swapUntil: 0, melee: null, gadgets: GADGET.uses, gadgetCd: 0, boostUntil: 0, padCd: 0, dmgDealt: 0,
+      ready: bot, cloakUntil: 0, kvx: 0, kvy: 0, weapon: 0, swapUntil: 0, melee: null, gadgets: GADGET.uses, gadgetCd: 0, boostUntil: 0, padCd: 0, dmgDealt: 0,
       deaths: 0, supersUsed: 0, cratesBroken: 0, gemsCollected: 0, maxGemsHeld: 0, starsStolen: 0, bestSteal: 0, hauntKOs: 0,
     };
     this.players.set(p.id, p);
@@ -141,7 +142,11 @@ export class Room {
     const isHost = p.id === this.hostId;
     switch (m.t) {
       case 'pick':
-        if (this.state === 'lobby' && BRAWLERS[m.brawler]) { p.brawler = m.brawler; this.broadcastRoom(); }
+        if (this.state !== 'playing' && this.state !== 'countdown' && BRAWLERS[m.brawler]) { p.brawler = m.brawler; p.picked = true; this.broadcastRoom(); }
+        break;
+      case 'ready':
+        // Everyone except the host confirms their brawler before the host can start (like Brawl Stars).
+        if (this.state !== 'playing' && this.state !== 'countdown') { p.ready = Boolean(m.on); this.broadcastRoom(); }
         break;
       case 'mode':
         if (isHost && this.state === 'lobby' && MODES[m.mode]) {
@@ -177,7 +182,11 @@ export class Room {
         }
         break;
       case 'start':
-        if (isHost && this.state === 'lobby' && this.players.size >= MIN_PLAYERS) this.startMatch();
+        if (isHost && this.state === 'lobby' && this.players.size >= MIN_PLAYERS) {
+          const waiting = this.waitingFor();
+          if (waiting.length && !m.force) send(p.ws, { t: 'error', msg: `Waiting for ${waiting.map((w) => w.name).join(', ')} to pick a brawler and tap Ready.` });
+          else this.startMatch();
+        }
         break;
       case 'lobby':
         if (isHost && this.state === 'ended') this.backToLobby();
@@ -250,7 +259,7 @@ export class Room {
         ammo: MAX_AMMO, cooldown: 0, superCharge: 0, dash: null, hauntCd: 0, hauntAcc: 0, emote: -1, emoteUntil: 0,
         cubes: 0, kills: 0, rank: 0, inputs: [], ack: 0, lastHurt: -99, lastAttack: -99, revealUntil: -99, poisonAcc: 0,
         gems: 0, stars: 2, score: 0, respawnAt: 0, forfeit: false, kvx: 0, kvy: 0, weapon: 0, swapUntil: 0, melee: null,
-        gadgets: GADGET.uses, gadgetCd: 0, boostUntil: 0, padCd: 0, dmgDealt: 0,
+        gadgets: GADGET.uses, gadgetCd: 0, boostUntil: 0, padCd: 0, dmgDealt: 0, cloakUntil: 0,
         deaths: 0, supersUsed: 0, cratesBroken: 0, gemsCollected: 0, maxGemsHeld: 0, starsStolen: 0, bestSteal: 0, hauntKOs: 0,
         aim: Math.atan2(CENTER - spot.y, CENTER - spot.x),
         ai: p.bot ? { strafe: 1, strafeT: 0, target: null, reactAt: 0, wp: null, wpT: 0, unstuckT: 0, ux: 0, uy: 0, lx: 0, ly: 0, swapCd: 0, pickT: 0 } : null,
@@ -262,6 +271,7 @@ export class Room {
     this.haunts = [];
     this.gems = [];
     this.zones = [];
+    this.turrets = [];
     this.modifier = this.modSetting === 'random' ? MODIFIER_IDS[Math.floor(Math.random() * MODIFIER_IDS.length)]
       : this.modSetting === 'off' ? null : this.modSetting;
     this.nextModAt = { meteor: METEOR.start, drink: DRINK.start, shrooms: SHROOM.start }[this.modifier] ?? Infinity;
@@ -319,17 +329,24 @@ export class Room {
     if (records.length) this.onResults(records);
   }
 
+  // Connected people (not the host, not bots) who haven't tapped Ready yet.
+  waitingFor() {
+    return this.humans.filter((h) => h.id !== this.hostId && h.connected && !h.ready);
+  }
+
   backToLobby() {
     clearTimeout(this.resultsTimer);
     if (this.state !== 'ended') return;
     this.state = 'lobby';
-    for (const p of this.players.values()) { p.inMatch = false; p.alive = false; p.ghost = false; }
+    // New round: everyone confirms their brawler again.
+    for (const p of this.players.values()) { p.inMatch = false; p.alive = false; p.ghost = false; if (!p.bot) p.ready = false; }
     this.projs = [];
     this.cubes = [];
     this.crates = [];
     this.haunts = [];
     this.gems = [];
     this.zones = [];
+    this.turrets = [];
     this.modifier = null;
     this.broadcastRoom();
   }
@@ -427,6 +444,7 @@ export class Room {
     }
 
     this.updateProjectiles();
+    if (this.turrets.length) this.updateTurrets(fighters);
     if (this.modifier) this.updateModifier(fighters, safeR);
 
     // Loose items fly and bounce before they settle
@@ -620,6 +638,20 @@ export class Room {
       p.dash = { vx: dx * g.speed, vy: dy * g.speed, left: g.dist, dmg: 0, hit: new Set(), blink: true };
     } else if (p.brawler === 'boom') {
       this.spawnLob(p, 0, 0, 0, g.damage * this.powerOf(p), g.blast, false, 0, g.knock, 0, g.fuse);
+    } else if (p.brawler === 'melo') {
+      p.ammo = MAX_AMMO;
+    } else if (p.brawler === 'kit') {
+      p.cloakUntil = this.time + g.time;
+    } else if (p.brawler === 'tink') {
+      this.events.push({ k: 'shock', id: p.id, x: Math.round(p.x), y: Math.round(p.y), r: g.radius });
+      for (const o of this.players.values()) {
+        const d = Math.hypot(o.x - p.x, o.y - p.y);
+        if (!o.alive || o === p || this.sameTeam(p, o) || d > g.radius + PLAYER_RADIUS * 0.5) continue;
+        this.damage(o, g.damage * this.powerOf(p), p);
+        const a = d > 1 ? Math.atan2(o.y - p.y, o.x - p.x) : Math.random() * 6.28;
+        this.impulse(o, Math.cos(a) * g.knock, Math.sin(a) * g.knock);
+      }
+      for (const c of [...this.crates]) if (Math.hypot(c.x - p.x, c.y - p.y) <= g.radius + CRATE_R) this.hitCrate(c, g.damage, p);
     }
   }
 
@@ -656,6 +688,7 @@ export class Room {
 
   attackStart(p, ax, ay) {
     p.lastAttack = this.time;
+    p.cloakUntil = 0; // attacking breaks Kit's cloak
     p.revealUntil = this.time + REVEAL_TIME;
     p.aim = Math.atan2(ay, ax);
   }
@@ -681,6 +714,25 @@ export class Room {
     }
     if (w.attack === 'lob') {
       this.spawnLob(p, ax, ay, clamp(dist, w.minRange, w.range), dmg, w.blast, false, lead, w.knock, w.falloff);
+      return;
+    }
+    if (w.attack === 'lunge') {
+      // Kit dashes forward a short way, slicing whoever is in the path.
+      p.kvx = 0; p.kvy = 0;
+      p.dash = { vx: ax * w.dashSpeed, vy: ay * w.dashSpeed, left: w.range, dmg, hit: new Set(), lunge: true, knock: w.knock };
+      return;
+    }
+    if (w.attack === 'wave') {
+      // Melo's sound wave: a wide fan of piercing notes; each enemy is hit once per wave.
+      const hitSet = new Set();
+      for (let i = 0; i < w.pellets; i++) {
+        const a = p.aim + (i / (w.pellets - 1) - 0.5) * w.spread;
+        this.spawnBullet(p, a, 'wave', dmg, w.projSpeed, w.range, true, lead, { knock: w.knock, hitSet });
+      }
+      return;
+    }
+    if (w.attack === 'bounce') {
+      this.spawnBullet(p, p.aim, 'bounce', dmg, w.projSpeed, w.range, false, lead, { knock: w.knock, chain: { left: w.bounces, range: w.chainRange, hit: [] } });
       return;
     }
     const shots = w.attack === 'shotgun' ? w.pellets : 1;
@@ -741,6 +793,28 @@ export class Room {
     this.events.push({ k: 'super', id: p.id, w: s.kind, x: Math.round(p.x), y: Math.round(p.y) });
     if (s.kind === 'charge') {
       p.dash = { vx: ax * s.speed, vy: ay * s.speed, left: s.range, dmg, hit: new Set() };
+    } else if (s.kind === 'heal') {
+      // Healing Chorus: you and teammates nearby.
+      this.events.push({ k: 'chorus', id: p.id, x: Math.round(p.x), y: Math.round(p.y), r: s.range });
+      for (const o of this.players.values()) {
+        if (!o.alive || (o !== p && !this.sameTeam(p, o)) || Math.hypot(o.x - p.x, o.y - p.y) > s.range) continue;
+        const healed = Math.min(s.heal, o.maxHp - o.hp);
+        o.hp += healed;
+        if (healed > 0) this.events.push({ k: 'heal', id: o.id, a: Math.round(healed), x: Math.round(o.x), y: Math.round(o.y) });
+      }
+    } else if (s.kind === 'leap') {
+      // Shadow Leap: sail over walls to the aimed spot and slam down.
+      const d = clamp(dist, s.minRange, s.range);
+      p.kvx = 0; p.kvy = 0;
+      p.dash = { vx: ax * JUMP.speed, vy: ay * JUMP.speed, left: d, total: d, dmg: 0, hit: new Set(), fly: true, slam: { dmg, blast: s.blast } };
+    } else if (s.kind === 'turret') {
+      const d = clamp(dist, s.minRange, s.range);
+      let spot = { x: clamp(p.x + ax * d, 40, WORLD - 40), y: clamp(p.y + ay * d, 40, WORLD - 40) };
+      const t = tileAt(spot.x, spot.y);
+      if (t === '#' || t === 'w') spot = nearestFloor(spot.x, spot.y);
+      this.turrets = this.turrets.filter((tu) => tu.owner !== p.id); // one turret each
+      this.turrets.push({ id: this.nextObjId++, owner: p.id, x: spot.x, y: spot.y, hp: TURRET.hp, maxHp: TURRET.hp, until: this.time + TURRET.life, cd: 0.6, aim: p.aim });
+      this.events.push({ k: 'build', id: p.id, x: Math.round(spot.x), y: Math.round(spot.y) });
     } else if (s.kind === 'volley') {
       for (let i = 0; i < s.shots; i++) {
         this.spawnBullet(p, p.aim + (i / (s.shots - 1) - 0.5) * s.spread, 'volley', dmg, s.projSpeed, s.range, true, lead, { knock: 120 });
@@ -751,11 +825,12 @@ export class Room {
   }
 
   // `lead` (seconds) fast-forwards the shot by the shooter's network delay, so what they saw is what hits.
-  spawnBullet(p, a, kind, dmg, speed, range, pierce, lead = 0, { knock = 0, hitR = 0 } = {}) {
+  spawnBullet(p, a, kind, dmg, speed, range, pierce, lead = 0, { knock = 0, hitR = 0, hitSet = null, chain = null, from = null } = {}) {
+    const ox = from ? from.x : p.x + Math.cos(a) * (PLAYER_RADIUS + 4), oy = from ? from.y : p.y + Math.sin(a) * (PLAYER_RADIUS + 4);
     const pr = {
       id: this.nextObjId++, kind, owner: p.id, dmg, knock, hitR: PLAYER_RADIUS + (hitR || 10),
-      x: p.x + Math.cos(a) * (PLAYER_RADIUS + 4), y: p.y + Math.sin(a) * (PLAYER_RADIUS + 4),
-      vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, travelled: 0, range, hit: pierce ? new Set() : null,
+      x: ox, y: oy,
+      vx: Math.cos(a) * speed, vy: Math.sin(a) * speed, travelled: 0, range, hit: hitSet ?? (pierce ? new Set() : null), chain,
     };
     if (lead <= 0 || !this.stepBullet(pr, lead)) this.projs.push(pr);
   }
@@ -784,17 +859,79 @@ export class Room {
       }
       const crate = this.crates.find((c) => Math.hypot(c.x - pr.x, c.y - pr.y) < CRATE_R + 6);
       if (crate) { this.hitCrate(crate, pr.dmg, owner); return true; }
+      if (this.turrets.length) {
+        const tu = this.turrets.find((t) => t.owner !== pr.owner && !this.sameTeam(owner, this.players.get(t.owner)) && Math.hypot(t.x - pr.x, t.y - pr.y) < 34);
+        if (tu) { this.hitTurret(tu, pr.dmg); return true; }
+      }
       for (const p of this.players.values()) {
         if (!p.alive || p.id === pr.owner || pr.hit?.has(p.id) || this.sameTeam(owner, p)) continue;
         if (Math.hypot(p.x - pr.x, p.y - pr.y) <= pr.hitR) {
           this.damage(p, pr.dmg, owner);
           if (pr.knock) this.impulse(p, (pr.vx / speed) * pr.knock, (pr.vy / speed) * pr.knock);
+          if (pr.chain && owner) this.bounceShot(pr, p, owner);
           if (pr.hit) pr.hit.add(p.id); // piercing shots keep going
           else return true;
         }
       }
     }
     return false;
+  }
+
+  // Tink's orb jumps to the next enemy nearby (not one it already hit), a little weaker each time.
+  bounceShot(pr, from, owner) {
+    const ch = pr.chain;
+    ch.hit.push(from.id);
+    if (ch.left <= 0) return;
+    let best = null, bd = ch.range;
+    for (const o of this.players.values()) {
+      if (!o.alive || o.id === owner.id || ch.hit.includes(o.id) || this.sameTeam(owner, o)) continue;
+      const d = Math.hypot(o.x - from.x, o.y - from.y);
+      if (d < bd && hasLineOfSight(from.x, from.y, o.x, o.y)) { bd = d; best = o; }
+    }
+    if (!best) return;
+    const a = Math.atan2(best.y - from.y, best.x - from.x);
+    const speed = Math.hypot(pr.vx, pr.vy);
+    this.spawnBullet(owner, a, 'bounce', pr.dmg * 0.85, speed, ch.range + 40, false, 0, {
+      knock: pr.knock, from: { x: from.x + Math.cos(a) * (PLAYER_RADIUS + 6), y: from.y + Math.sin(a) * (PLAYER_RADIUS + 6) },
+      chain: { left: ch.left - 1, range: ch.range, hit: [...ch.hit] },
+    });
+    this.events.push({ k: 'zap', x: Math.round(from.x), y: Math.round(from.y), tx: Math.round(best.x), ty: Math.round(best.y) });
+  }
+
+  hitTurret(tu, dmg) {
+    tu.hp -= dmg;
+    this.events.push({ k: 'crate', x: Math.round(tu.x), y: Math.round(tu.y) });
+    if (tu.hp > 0) return;
+    this.turrets = this.turrets.filter((t) => t !== tu);
+    this.events.push({ k: 'crateBreak', x: Math.round(tu.x), y: Math.round(tu.y) });
+  }
+
+  updateTurrets(fighters) {
+    this.turrets = this.turrets.filter((tu) => {
+      const owner = this.players.get(tu.owner);
+      if (!owner?.alive || this.time >= tu.until) {
+        this.events.push({ k: 'crateBreak', x: Math.round(tu.x), y: Math.round(tu.y) });
+        return false;
+      }
+      tu.cd -= DT;
+      let target = null, td = TURRET.range;
+      for (const o of fighters) {
+        if (!o.alive || o === owner || this.sameTeam(owner, o) || this.time < o.cloakUntil) continue;
+        const d = Math.hypot(o.x - tu.x, o.y - tu.y);
+        if (d < td && hasLineOfSight(tu.x, tu.y, o.x, o.y)) { td = d; target = o; }
+      }
+      if (target) {
+        tu.aim = Math.atan2(target.y - tu.y, target.x - tu.x);
+        if (tu.cd <= 0) {
+          tu.cd = TURRET.every;
+          this.spawnBullet(owner, tu.aim, 'bullet', TURRET.damage * (this.time < owner.boostUntil ? DRINK.dmg : 1), TURRET.projSpeed, TURRET.range, false, 0, {
+            knock: 40, from: { x: tu.x + Math.cos(tu.aim) * 28, y: tu.y + Math.sin(tu.aim) * 28 },
+          });
+          this.events.push({ k: 'tshot', x: Math.round(tu.x), y: Math.round(tu.y) });
+        }
+      }
+      return true;
+    });
   }
 
   updateDash(p) {
@@ -813,6 +950,19 @@ export class Room {
         resolveWalls(p, PLAYER_RADIUS);
         resolveCircles(p, PLAYER_RADIUS, this.crates);
         this.events.push({ k: 'land', id: p.id, x: Math.round(p.x), y: Math.round(p.y) });
+        if (d.slam) {
+          // Shadow Leap lands: damage and knock back everyone around.
+          this.events.push({ k: 'boom', x: Math.round(p.x), y: Math.round(p.y), r: d.slam.blast, big: 0 });
+          for (const o of this.players.values()) {
+            const dd = Math.hypot(o.x - p.x, o.y - p.y);
+            if (!o.alive || o === p || this.sameTeam(p, o) || dd > d.slam.blast + PLAYER_RADIUS * 0.5) continue;
+            this.damage(o, d.slam.dmg, p);
+            const a = dd > 1 ? Math.atan2(o.y - p.y, o.x - p.x) : Math.random() * 6.28;
+            this.impulse(o, Math.cos(a) * 600, Math.sin(a) * 600);
+          }
+          for (const c of [...this.crates]) if (Math.hypot(c.x - p.x, c.y - p.y) <= d.slam.blast + CRATE_R) this.hitCrate(c, d.slam.dmg, p);
+          for (const tu of [...this.turrets]) if (tu.owner !== p.id && Math.hypot(tu.x - p.x, tu.y - p.y) <= d.slam.blast + 30) this.hitTurret(tu, d.slam.dmg);
+        }
       }
       return;
     }
@@ -831,10 +981,16 @@ export class Room {
         if (dist < PLAYER_RADIUS * 2 + 6) {
           d.hit.add(o.id);
           this.damage(o, d.dmg, p);
-          // Toss them aside: sideways toward whichever side they were on, plus some forward carry.
           const sp = Math.hypot(d.vx, d.vy), fx = d.vx / sp, fy = d.vy / sp;
-          const side = Math.sign(-fy * dx + fx * dy) || 1;
-          this.impulse(o, -fy * 320 * side + fx * 150, fx * 320 * side + fy * 150);
+          if (d.lunge) {
+            // Kit's slash shoves them straight back and the dash stops on contact.
+            this.impulse(o, fx * d.knock, fy * d.knock);
+            d.left = 0;
+          } else {
+            // Toss them aside: sideways toward whichever side they were on, plus some forward carry.
+            const side = Math.sign(-fy * dx + fx * dy) || 1;
+            this.impulse(o, -fy * 320 * side + fx * 150, fx * 320 * side + fy * 150);
+          }
         }
       }
     }
@@ -873,6 +1029,9 @@ export class Room {
           }
         }
         this.pushItems(pr.tx, pr.ty, pr.blast + 20, pr.knock);
+        for (const tu of [...this.turrets]) {
+          if (tu.owner !== pr.owner && !this.sameTeam(owner, this.players.get(tu.owner)) && Math.hypot(tu.x - pr.tx, tu.y - pr.ty) <= pr.blast + 30) this.hitTurret(tu, pr.dmg);
+        }
         for (const c of [...this.crates]) {
           if (Math.hypot(c.x - pr.tx, c.y - pr.ty) <= pr.blast + CRATE_R) this.hitCrate(c, pr.dmg, owner);
         }
@@ -919,6 +1078,8 @@ export class Room {
     p.kvy = 0;
     p.inputs.length = 0;
     p.boostUntil = 0;
+    p.cloakUntil = 0;
+    this.turrets = this.turrets.filter((t) => t.owner !== p.id);
     p.deaths++;
     if (attacker && attacker !== p) attacker.kills++;
     if (attacker && haunted) attacker.hauntKOs++;
@@ -959,6 +1120,7 @@ export class Room {
 
   canSee(viewer, p) {
     if (viewer.id === p.id || !viewer.alive || this.sameTeam(viewer, p)) return true;
+    if (this.time < p.cloakUntil) return Math.hypot(viewer.x - p.x, viewer.y - p.y) < BUSH_SEE_DIST * 0.8;
     if (!inBush(p.x, p.y) || this.time < p.revealUntil) return true;
     return Math.hypot(viewer.x - p.x, viewer.y - p.y) < BUSH_SEE_DIST;
   }
@@ -1001,7 +1163,10 @@ export class Room {
     ai.pickT -= DT;
     if (target && ai.pickT <= 0) {
       ai.pickT = 1;
-      const opts = [0, 1].map((slot) => ({ slot, range: weaponOf(p.brawler, slot).range }));
+      const opts = [0, 1].map((slot) => {
+        const w = weaponOf(p.brawler, slot);
+        return { slot, range: w.range, dps: (w.damage * (w.pellets && w.attack !== 'wave' ? w.pellets * 0.6 : 1)) / w.reload };
+      });
       const reach = opts.filter((o) => o.range >= td).sort((x, y) => x.range - y.range);
       const pick = (reach[0] ?? opts.sort((x, y) => y.range - x.range)[0]).slot;
       if (pick !== p.weapon && this.time > ai.swapCd) { this.swapWeapon(p); ai.swapCd = this.time + 3; b = weaponOf(p.brawler, p.weapon); }
@@ -1023,6 +1188,9 @@ export class Room {
         ai.blinkX = -(target.x - p.x) / td; ai.blinkY = -(target.y - p.y) / td;
         this.useGadget(p);
       } else if (p.brawler === 'boom' && target && td < 180) this.useGadget(p);
+      else if (p.brawler === 'melo' && target && p.ammo < 0.6) this.useGadget(p);
+      else if (p.brawler === 'kit' && target && td > 250 && td < 520) this.useGadget(p);
+      else if (p.brawler === 'tink' && target && td < 160) this.useGadget(p);
       if (p.dash) return { mx: 0, my: 0 };
     }
 
@@ -1035,9 +1203,12 @@ export class Room {
       mx = dx / d; my = dy / d;
     } else if (target) {
       const dx = target.x - p.x, dy = target.y - p.y, d = Math.max(1, td);
-      const want = b.attack === 'melee' ? 80 : b.attack === 'shotgun' ? 140 : b.range * 0.65;
+      const want = b.attack === 'melee' ? 80 : b.attack === 'lunge' ? 130 : b.attack === 'shotgun' ? 140 : b.attack === 'wave' ? 220 : b.range * 0.65;
       const hurt = p.hp < p.maxHp * 0.35;
-      const dir = hurt ? -1 : d > want ? 1 : -0.8; // low on health: back off and let regen kick in
+      // No clear shot for a while (a wall in the way)? Close in and circle until there is one.
+      const blocked = b.attack !== 'lob' && !hasLineOfSight(p.x, p.y, target.x, target.y);
+      ai.blockedT = blocked ? (ai.blockedT ?? 0) + DT : 0;
+      const dir = hurt ? -1 : ai.blockedT > 1 ? 1 : d > want ? 1 : -0.8; // low on health: back off and let regen kick in
       ai.strafeT -= DT;
       if (ai.strafeT <= 0) { ai.strafe = Math.random() < 0.5 ? -1 : 1; ai.strafeT = 0.6 + Math.random(); }
       mx = (dx / d) * dir + (-dy / d) * BOT.strafe * ai.strafe;
@@ -1056,13 +1227,15 @@ export class Room {
         const ex = tx - p.x, ey = ty - p.y, ed = Math.max(1, Math.hypot(ex, ey));
         const a = Math.atan2(ey, ex) + (Math.random() - 0.5) * (lob ? BOT.lobAim : BOT.aim);
         const err = lob ? 1 + (Math.random() * 2 - 1) * (0.08 + 0.1 * ed / b.range) : 1;
-        if (p.superCharge >= 1 && d < b.super.range * 0.85 && Math.random() < BOT.superChance) {
+        const sk = b.super.kind;
+        const superOk = sk === 'heal' ? p.hp < p.maxHp * 0.6 : sk === 'turret' ? d < 600 : d < b.super.range * 0.85;
+        if (p.superCharge >= 1 && superOk && Math.random() < BOT.superChance) {
           this.superFire(p, Math.cos(a), Math.sin(a), ed * err);
-        } else if (d < b.range * 0.92 && p.ammo >= 1 && this.time >= (ai.nextShot ?? 0) && Math.random() < BOT.fireChance) {
+        } else if (d < b.range * 0.92 && p.ammo >= 1 && this.time >= (ai.nextShot ?? 0) && Math.random() < BOT.fireChance * clamp(1.35 / b.reload, 0.7, 1.8)) {
           // Usually keep a shot in reserve, and take a breath between shots.
           if (p.ammo >= 2 || Math.random() < 0.35) {
             this.fire(p, Math.cos(a), Math.sin(a), ed * err);
-            ai.nextShot = this.time + BOT.shotGap + Math.random() * 0.4;
+            ai.nextShot = this.time + (BOT.shotGap + Math.random() * 0.4) * Math.min(1, b.reload / 1.35);
           }
         }
       }
@@ -1113,7 +1286,7 @@ export class Room {
       hostId: this.hostId,
       players: [...this.players.values()].map((p) => ({
         id: p.id, name: p.name, brawler: p.brawler, bot: p.bot, connected: p.connected, inMatch: p.inMatch, wins: p.wins, team: p.team,
-        out: Boolean(p.forfeit),
+        out: Boolean(p.forfeit), ready: p.bot || p.ready,
         trophies: p.account?.trophies ?? null,
       })),
       results: this.results,
@@ -1134,7 +1307,7 @@ export class Room {
     const emoteOf = (p) => (this.time < p.emoteUntil ? p.emote : undefined);
     const projs = this.projs.map((pr) => pr.kind === 'lob'
       ? { i: pr.id, o: pr.owner, k: 'l', sx: Math.round(pr.sx), sy: Math.round(pr.sy), tx: Math.round(pr.tx), ty: Math.round(pr.ty), p: round2(pr.t / pr.flight), r: pr.blast, big: pr.big ? 1 : 0 }
-      : { i: pr.id, o: pr.owner, k: { pellet: 'p', volley: 'v', orb: 'o' }[pr.kind] ?? 'b', x: Math.round(pr.x), y: Math.round(pr.y) });
+      : { i: pr.id, o: pr.owner, k: { pellet: 'p', volley: 'v', orb: 'o', wave: 'w', bounce: 'j' }[pr.kind] ?? 'b', x: Math.round(pr.x), y: Math.round(pr.y) });
     const base = {
       t: 'snap', time: round2(this.time), state: this.state, mode: this.mode, cd: Math.max(0, COUNTDOWN - this.time),
       poison: Math.round(this.mode === 'showdown' ? poisonRadius(this.matchTime) : 99999), mt: Math.round(this.matchTime), alive: fighters.length,
@@ -1145,6 +1318,7 @@ export class Room {
       haunts: this.haunts.map((h) => ({ i: h.id, x: Math.round(h.x), y: Math.round(h.y), r: h.r, l: round2(h.until - this.time) })),
       zones: this.zones.map((z) => ({ i: z.id, k: z.k, x: Math.round(z.x), y: Math.round(z.y), r: z.r, l: round2(z.until - this.time) })),
       twist: this.modifier,
+      turrets: this.turrets.map((t) => ({ i: t.id, o: t.owner, x: Math.round(t.x), y: Math.round(t.y), h: Math.round(Math.max(0, t.hp)), m: t.maxHp, a: round2(t.aim) })),
       ghosts: all.filter((p) => p.ghost).map((p) => ({ i: p.id, x: Math.round(p.x), y: Math.round(p.y), em: emoteOf(p) })),
       gems: this.gems.map((g) => ({ i: g.id, x: Math.round(g.x), y: Math.round(g.y) })),
       tg: this.mode === 'gemgrab' ? this.teamGems() : null,
@@ -1160,6 +1334,7 @@ export class Room {
         wp: p.weapon, kx: Math.round(p.kvx), ky: Math.round(p.kvy),
         ...(p.dash?.fly ? { dp: round2(1 - p.dash.left / p.dash.total) } : {}),
         ...(this.time < p.boostUntil ? { bo: 1 } : {}),
+        ...(this.time < p.cloakUntil ? { ck: 1 } : {}),
       }));
       const me = {
         alive: viewer.alive, ghost: viewer.ghost, ack: viewer.ack, ammo: round2(viewer.ammo), cubes: viewer.cubes,
