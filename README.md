@@ -1,4 +1,4 @@
-# Bushwhack
+# Rumble Reef
 
 A real-time multiplayer brawler for up to 6 players, with three Brawl Stars-style modes. Friends join from any phone or laptop with a 4-letter room code: no login, no install.
 
@@ -75,5 +75,5 @@ npm start          # http://localhost:3000  (static dev server; multiplayer stil
 npm run build      # what Vercel deploys, in dist/
 ```
 
-Live: https://bushwhack.vercel.app
+Live: https://rumblereef.vercel.app (also https://bushwhack.vercel.app)
 

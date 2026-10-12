@@ -1,5 +1,5 @@
 """
-Exports Bushwhack's 3D models for the real-time (Three.js) renderer.
+Exports Rumble Reef's 3D models for the real-time (Three.js) renderer.
 
     /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
         -P tools/blender/export_models.py -- public/models

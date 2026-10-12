@@ -1,5 +1,5 @@
 """
-Bushwhack asset builder: models every character, prop and the arena in Blender, then renders
+Rumble Reef asset builder: models every character, prop and the arena in Blender, then renders
 them into the sprite atlases the game draws.
 
 Run from the project root (Blender 4.2+, EEVEE):
@@ -1150,13 +1150,18 @@ def render_hero(manifest):
     bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=3.2, depth=0.4, location=(0, 0.6, -0.2))
     island = bpy.context.active_object
     _finish(island, noise_mat('herograss', '#6a8a40', '#97ad62', 2), 0.02, True)
-    for (x, y, v) in ((-1.9, 1.6, 0), (1.9, 1.7, 2), (0.0, 2.4, 1), (-2.6, 0.2, 1), (2.6, 0.3, 0)):
+    for (x, y, v) in ((-1.9, 2.0, 0), (1.9, 2.1, 2), (0.0, 2.6, 1), (-2.9, 1.2, 1), (2.9, 1.3, 0)):
         b = build_bush(v, stretch=False)
         b.location = (x, y, 0)
         b.scale = (1.3, 1.3, 1.3)
     w = build_wall(0, stretch=False)
     w.location = (-1.1, 2.6, 0)
-    poses = (('vex', (-1.25, 0.2, 0), 0.75), ('brick', (0, -0.3, 0), -0.35), ('boom', (1.25, 0.2, 0), -0.45))
+    # All six brawlers in a shallow arc, turned a little toward the middle.
+    order = ('melo', 'vex', 'brick', 'boom', 'tink', 'kit')
+    poses = []
+    for i, cid in enumerate(order):
+        x = -2.4 + i * 0.96
+        poses.append((cid, (x, 0.12 * x * x - 0.25 + (0.25 if i % 2 else 0), 0), -x * 0.2))
     for cid, loc, rot in poses:
         r = CHARACTERS[cid]()
         r['root'].location = loc
@@ -1166,7 +1171,7 @@ def render_hero(manifest):
     cam_data.lens = 50
     cam = bpy.data.objects.new('HeroCam', cam_data)
     sc.collection.objects.link(cam)
-    cam.location = (0, -6.2, 3.0)
+    cam.location = (0, -8.4, 3.9)
     cam.rotation_euler = (math.radians(68), 0, 0)
     sc.camera = cam
     sc.render.resolution_x, sc.render.resolution_y = 1600, 900

@@ -45,4 +45,4 @@ http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end('Not found');
   }
-}).listen(PORT, () => console.log(`Bushwhack dev server on http://localhost:${PORT}`));
+}).listen(PORT, () => console.log(`Rumble Reef dev server on http://localhost:${PORT}`));

@@ -1338,7 +1338,7 @@ $('leaveBtn').addEventListener('click', async () => {
 $('copyBtn').addEventListener('click', async () => {
   const url = inviteUrl();
   if (navigator.share && input.touchMode) {
-    try { await navigator.share({ title: 'Bushwhack', text: `Join my Bushwhack room: ${app.code}`, url }); return; } catch { /* fall through */ }
+    try { await navigator.share({ title: 'Rumble Reef', text: `Join my Rumble Reef room: ${app.code}`, url }); return; } catch { /* fall through */ }
   }
   try {
     await navigator.clipboard.writeText(url);
