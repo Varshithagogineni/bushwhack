@@ -344,6 +344,7 @@ def build_body(c):
 
 
 def arm(rig, name, shoulder, hand, c, radius=0.058, parent=None):
+    rig.setdefault('arms', []).append({'name': name, 'shoulder': tuple(shoulder), 'hand': tuple(hand)})  # for the skeleton
     limb(name, shoulder, hand, radius, rig['tunic'], parent or rig['upper'])
     prim('sphere', name + 'hand', hand, (0.058, 0.058, 0.058), rig['glove'], parent or rig['upper'])
 

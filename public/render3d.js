@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
@@ -132,6 +133,7 @@ export class Renderer3D extends Renderer {
     const names = [...manifest.characters, ...manifest.props, ...manifest.scenery];
     const gltfs = await Promise.all(names.map((n) => loader.loadAsync(`/models/${n}.glb`)));
     this.models = Object.fromEntries(names.map((n, i) => [n, gltfs[i].scene]));
+    this.clips = Object.fromEntries(names.map((n, i) => [n, gltfs[i].animations ?? []]));
     const texLoader = new THREE.TextureLoader();
     const [albedo, mask] = await Promise.all([
       texLoader.loadAsync(`/models/${manifest.ground.albedo}`),
@@ -245,9 +247,87 @@ export class Renderer3D extends Renderer {
     });
   }
 
+  // Soft rim light on characters so they read clearly against the ground, like a real game's character shader.
+  addRim(mat) {
+    mat.onBeforeCompile = (shader) => {
+      shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>', `
+        float rimF = pow(1.0 - saturate(dot(normalize(normal), normalize(vViewPosition))), 3.0);
+        outgoingLight += rimF * vec3(1.0, 0.9, 0.75) * 0.16;
+        #include <opaque_fragment>`);
+    };
+    mat.customProgramCacheKey = () => 'charRim';
+    return mat;
+  }
+
+  // Rigged brawlers (skinned, from tools/blender/rig.py): merge the per-material pieces into a few skinned meshes.
+  // Plain colours become vertex colours multiplied by the ambient occlusion baked in Blender.
+  optimizeSkinned(root) {
+    const skinned = [];
+    root.traverse((o) => { if (o.isSkinnedMesh) skinned.push(o); });
+    const first = skinned[0];
+    const groups = new Map();
+    for (const m of skinned) {
+      const mat = m.material;
+      const glow = mat.emissive && mat.emissive.getHex() !== 0 && (mat.emissiveIntensity ?? 1) > 0.5;
+      const map = !glow ? mat.map : null;
+      const kind = glow ? 'g' : map ? `t${map.uuid}` : 'v';
+      const geo = m.geometry.clone();
+      const keep = ['position', 'normal', 'skinIndex', 'skinWeight', 'color', ...(map ? ['uv'] : [])];
+      for (const name of Object.keys(geo.attributes)) if (!keep.includes(name)) geo.deleteAttribute(name);
+      const n = geo.attributes.position.count;
+      const ao = geo.attributes.color;
+      const base = glow ? mat.emissive.clone().multiplyScalar(1.6) : mat.color.clone();
+      const col = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const k = glow || !ao ? 1 : ao.getX(i);
+        col[i * 3] = base.r * k; col[i * 3 + 1] = base.g * k; col[i * 3 + 2] = base.b * k;
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      if (!geo.index) geo.setIndex([...Array(n).keys()]);
+      if (!groups.has(kind)) groups.set(kind, { map, kind, geos: [] });
+      groups.get(kind).geos.push(geo);
+    }
+    for (const { map, kind, geos } of groups.values()) {
+      const material = kind === 'g' ? new THREE.MeshBasicMaterial({ vertexColors: true })
+        : this.addRim(new THREE.MeshStandardMaterial({ vertexColors: true, map, roughness: 0.78 }));
+      const mesh = new THREE.SkinnedMesh(mergeGeometries(geos), material);
+      mesh.position.copy(first.position);
+      mesh.quaternion.copy(first.quaternion);
+      mesh.scale.copy(first.scale);
+      mesh.bind(first.skeleton, first.bindMatrix);
+      mesh.userData.body = true;
+      mesh.castShadow = kind !== 'g';
+      mesh.frustumCulled = false;
+      first.parent.add(mesh);
+    }
+    for (const m of skinned) m.removeFromParent();
+  }
+
+  // Clips per brawler: idle/run/victory blend normally; attack and hit are layered on top (additive).
+  clipsFor(id) {
+    this.clipCache ??= {};
+    if (this.clipCache[id]) return this.clipCache[id];
+    const all = this.clips?.[id] ?? [];
+    const get = (n) => all.find((c) => c.name === n);
+    const additive = (n) => { const c = get(n); return c ? THREE.AnimationUtils.makeClipAdditive(c.clone()) : null; };
+    this.clipCache[id] = { idle: get('idle'), run: get('run'), victory: get('victory'), attack: additive('attack'), hit: additive('hit') };
+    return this.clipCache[id];
+  }
+
+  // Rotate a bone by a rotation given in world space, on top of its animated pose.
+  rotateBoneWorld(bone, axis, angle) {
+    if (!bone || Math.abs(angle) < 1e-4) return;
+    const P = bone.parent.getWorldQuaternion(this.tmpQ2 ??= new THREE.Quaternion());
+    const qw = (this.tmpQ3 ??= new THREE.Quaternion()).setFromAxisAngle(axis, angle);
+    // local' = P^-1 * qw * P * local
+    const conjP = (this.tmpQ4 ??= new THREE.Quaternion()).copy(P).invert();
+    bone.quaternion.premultiply(P).premultiply(qw).premultiply(conjP);
+  }
+
   // Merge each character into a handful of meshes (one per animated pivot), using vertex colours,
   // so six brawlers cost ~60 draw calls instead of ~500.
   optimizeCharacter(root) {
+    if ((() => { let k = false; root.traverse((o) => { if (o.isSkinnedMesh) k = true; }); return k; })()) return this.optimizeSkinned(root);
     root.updateMatrixWorld(true);
     const pivots = new Set();
     root.traverse((o) => { if (PIVOTS.includes(o.name)) pivots.add(o); });
@@ -912,7 +992,7 @@ export class Renderer3D extends Renderer {
     let e = this.players.get(p.id);
     if (e && e.brawler !== p.brawler) { this.scene.remove(e.obj); e = null; }
     if (!e) {
-      const obj = this.models[p.brawler].clone(true);
+      const obj = SkeletonUtils.clone(this.models[p.brawler]);
       obj.scale.setScalar(CHAR_SCALE);
       obj.rotation.order = 'ZXY'; // yaw first, then lean about world axes
       const mats = new Map();
@@ -920,10 +1000,37 @@ export class Renderer3D extends Renderer {
       obj.traverse((o) => {
         if (PIVOTS.includes(o.name)) piv[o.name] = o;
         if (o.isMesh && o.userData.body) {
-          if (!mats.has(o.material)) mats.set(o.material, o.material.clone());
+          if (!mats.has(o.material)) {
+            const m = o.material.clone();
+            m.onBeforeCompile = o.material.onBeforeCompile;
+            m.customProgramCacheKey = o.material.customProgramCacheKey;
+            mats.set(o.material, m);
+          }
           o.material = mats.get(o.material);
         }
       });
+      // Skeletal animation: idle/run blend by speed, attack/hit layered on top, springy hat and scarf.
+      let anim = null;
+      const clips = this.clipsFor(p.brawler);
+      if (clips.idle && clips.run) {
+        const mixer = new THREE.AnimationMixer(obj);
+        const act = {};
+        for (const [k, clip] of Object.entries(clips)) {
+          if (!clip) continue;
+          const a = mixer.clipAction(clip, undefined, k === 'attack' || k === 'hit' ? THREE.AdditiveAnimationBlendMode : THREE.NormalAnimationBlendMode);
+          if (k === 'attack' || k === 'hit') { a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = false; } else a.play();
+          act[k] = a;
+        }
+        act.run.setEffectiveWeight(0);
+        act.victory?.setEffectiveWeight(0);
+        const bone = (n) => obj.getObjectByName(n);
+        const springs = ['hat', 'hood', 'scarf1', 'scarf2', 'cape'].map((n) => ({ b: bone(n), n, o: new THREE.Vector2(), v: new THREE.Vector2() })).filter((x) => x.b);
+        anim = { mixer, act, spine: bone('spine'), chest: bone('chest'), springs, runW: 0, legYaw: null, lastAttack: 0 };
+      }
+      const shadow = new THREE.Mesh(this.blobGeo ??= new THREE.CircleGeometry(0.42, 24).rotateX(-Math.PI / 2),
+        this.blobMat ??= new THREE.MeshBasicMaterial({ map: this.softDisc(), color: '#000000', transparent: true, opacity: 0.4, depthWrite: false }));
+      shadow.position.y = 0.035;
+      shadow.renderOrder = 1;
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.5, 40).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: p.isMe ? ME : FOE, transparent: true, opacity: 0.9, depthWrite: false }));
       ring.position.y = 0.04;
@@ -932,9 +1039,9 @@ export class Renderer3D extends Renderer {
       boost.position.y = 0.5;
       boost.visible = false;
       const holder = new THREE.Group();
-      holder.add(obj, ring, boost);
+      holder.add(obj, ring, boost, shadow);
       this.scene.add(holder);
-      e = { obj: holder, model: obj, ring, boost, mats: [...mats.values()], piv, vel: new THREE.Vector2(), lean: new THREE.Vector2(), leanV: new THREE.Vector2(), sq: 0, sqv: 0, step: 0, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
+      e = { obj: holder, model: obj, ring, boost, shadow, anim, mats: [...mats.values()], piv, vel: new THREE.Vector2(), lean: new THREE.Vector2(), leanV: new THREE.Vector2(), sq: 0, sqv: 0, step: 0, brawler: p.brawler, phase: 0, last: null, yaw: Math.PI / 2 - p.aim, superRing: null, su: -1 };
       this.players.set(p.id, e);
     }
     e.seen = true;
@@ -975,11 +1082,35 @@ export class Renderer3D extends Renderer {
     e.obj.position.set(x, 0, z);
     // Turn smoothly toward the aim.
     const target = Math.PI / 2 - p.aim;
-    let d = ((target - e.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    const wrap = (a) => ((a + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    let d = wrap(target - e.yaw);
     e.yaw += d * Math.min(1, dt * 18);
+    let twist = 0;
+    if (e.anim) {
+      // Real-game locomotion: legs run where you're going, the upper body twists toward where you aim,
+      // and you backpedal (run cycle in reverse) when aiming behind you.
+      const A = e.anim;
+      const moving = speed > 0.6 && !p.fly;
+      let legTarget = target, back = 1;
+      if (moving) {
+        legTarget = Math.PI / 2 - Math.atan2(vz, vx);
+        if (Math.abs(wrap(target - legTarget)) > 1.95) { legTarget = wrap(legTarget + Math.PI); back = -1; }
+      }
+      A.legYaw ??= target;
+      A.legYaw += wrap(legTarget - A.legYaw) * Math.min(1, dt * (moving ? 12 : 8));
+      twist = THREE.MathUtils.clamp(wrap(e.yaw - A.legYaw), -1.25, 1.25);
+      A.runW += ((moving ? 1 : 0) - A.runW) * Math.min(1, dt * 10);
+      A.act.run.setEffectiveWeight(A.runW);
+      A.act.idle.setEffectiveWeight(1 - A.runW);
+      A.act.run.timeScale = back * THREE.MathUtils.clamp(speed / 3.8, 0.7, 2.2);
+      const champ = this.champ === p.id;
+      if (A.act.victory) A.act.victory.setEffectiveWeight(champ ? 1 : 0);
+      if (champ) { A.act.run.setEffectiveWeight(0); A.act.idle.setEffectiveWeight(0); }
+      A.mixer.update(Math.min(dt, 0.1));
+    }
     const sw = this.swaps.get(p.id);
     const spin = sw && now - sw.at < 350 ? ((now - sw.at) / 350) * Math.PI * 2 : 0;
-    e.model.rotation.y = e.yaw + spin;
+    e.model.rotation.y = (e.anim ? e.anim.legYaw : e.yaw) + spin;
     const kv = Math.hypot(p.kx || 0, p.ky || 0);
     const lean = Math.min(1, kv / 1400) * 0.44;
     e.model.rotation.x = (kv ? lean * ((p.ky || 0) / kv) : 0) + e.lean.y;
@@ -987,9 +1118,11 @@ export class Renderer3D extends Renderer {
     const sq = THREE.MathUtils.clamp(e.sq, -0.3, 0.4);
     const sy = 1 - 0.15 * flash - 0.28 * sq, sxz = 1 + 0.15 * flash + 0.18 * sq;
     e.model.scale.set(CHAR_SCALE * sxz, CHAR_SCALE * sy, CHAR_SCALE * sxz);
+    if (e.anim) this.poseExtras(e, p, twist, vx, vz, dt, now);
     // Footsteps kick up dust (sand-coloured on paths, faint green-grey on grass).
-    const stepN = Math.floor(e.phase / Math.PI);
-    if (stepN !== e.step && e.walk > 0.5 && !p.fly) {
+    const runA = e.anim?.act.run;
+    const stepN = runA ? (e.anim.runW > 0.5 ? Math.floor(runA.time / (runA.getClip().duration / 2)) : e.step) : Math.floor(e.phase / Math.PI);
+    if (stepN !== e.step && (e.anim ? e.anim.runW > 0.5 : e.walk > 0.5) && !p.fly) {
       e.step = stepN;
       const side = stepN % 2 ? 0.15 : -0.15, yaw = e.yaw;
       const fx = x + Math.cos(yaw) * side, fz = z - Math.sin(yaw) * side;
@@ -1025,6 +1158,9 @@ export class Renderer3D extends Renderer {
     const hop = this.champ === p.id ? Math.abs(Math.sin(now / 180)) * 0.45 : 0;
     e.model.position.y = lift + hop + (p.dash && !p.fly ? 0.08 : 0);
     e.boost.visible = Boolean(p.boost);
+    const h = e.model.position.y;
+    e.shadow.scale.setScalar(1 / (1 + h * 0.6));
+    e.shadow.material.opacity = 0.4;
     if (p.boost) e.boost.material.opacity = 0.65 + 0.35 * Math.sin(now / 90);
     // Super charge ring under your own feet.
     if (p.isMe) {
@@ -1041,6 +1177,50 @@ export class Renderer3D extends Renderer {
       }
       if (e.superRing) e.superRing.material.opacity = su >= 1 ? 0.65 + 0.35 * Math.sin(now / 80) : 0.9;
     }
+  }
+
+  // After the animation mixer: twist the torso toward the aim and swing hat/scarf/cape on springs.
+  poseExtras(e, p, twist, vx, vz, dt, now) {
+    const A = e.anim;
+    const up = this.up;
+    e.model.updateMatrixWorld(true);
+    this.rotateBoneWorld(A.spine, up, twist * 0.35);
+    A.spine?.updateMatrixWorld(true);
+    this.rotateBoneWorld(A.chest, up, twist * 0.65);
+    if (dt <= 0 || dt > 0.1) return;
+    const ax = (vx - (A.pvx ?? vx)) / dt, az = (vz - (A.pvz ?? vz)) / dt;
+    A.pvx = vx; A.pvz = vz;
+    const sp = Math.hypot(vx, vz);
+    for (const s of A.springs) {
+      // Trailing cloth (scarf, cape, hood tip) streams behind the motion; the hat wobbles against acceleration.
+      const hang = s.n !== 'hat';
+      let tx = hang ? -vx * 0.06 - ax * 0.012 : -ax * 0.01, tz = hang ? -vz * 0.06 - az * 0.012 : -az * 0.01;
+      if (hang && sp > 0.5) { const f = Math.sin(now / 70 + s.n.length) * 0.06 * Math.min(1, sp / 3); tx += -vz / sp * f; tz += vx / sp * f; }
+      const lim = hang ? (s.n === 'cape' ? 0.45 : 0.7) : 0.22;
+      const tl = Math.hypot(tx, tz);
+      if (tl > lim) { tx *= lim / tl; tz *= lim / tl; }
+      const k = hang ? 90 : 160, c = hang ? 9 : 10;
+      s.v.x += (k * (tx - s.o.x) - c * s.v.x) * dt;
+      s.v.y += (k * (tz - s.o.y) - c * s.v.y) * dt;
+      s.o.x += s.v.x * dt;
+      s.o.y += s.v.y * dt;
+      const ang = Math.hypot(s.o.x, s.o.y);
+      if (ang < 1e-3) continue;
+      // Tip displaced toward (o.x, o.y): rotate about up x dir (sign flips for hanging bones).
+      const axis = (this.tmpAxis ??= new THREE.Vector3()).set(s.o.y, 0, -s.o.x).normalize();
+      s.b.parent.updateMatrixWorld(true);
+      this.rotateBoneWorld(s.b, axis, hang ? -ang : ang);
+    }
+  }
+
+  playAction(id, kind, { weight = 1, timeScale = 1 } = {}) {
+    const A = this.players.get(id)?.anim;
+    const a = A?.act[kind];
+    if (!a) return;
+    a.reset();
+    a.setEffectiveTimeScale(timeScale);
+    a.setEffectiveWeight(weight);
+    a.play();
   }
 
   rustleBush(b, amount) {
@@ -1149,6 +1329,10 @@ export class Renderer3D extends Renderer {
 
   addEvent(e, now) {
     if (e.k === 'dmg') {
+      if (e.src !== 'poison' && now - (this.hitAnimAt?.get(e.id) ?? 0) > 250) {
+        (this.hitAnimAt ??= new Map()).set(e.id, now);
+        this.playAction(e.id, 'hit', { weight: 0.9 });
+      }
       this.flashes.set(e.id, now);
       this.floaters.push({ ...e, born: now, life: 0.9 });
       return;
@@ -1197,6 +1381,9 @@ export class Renderer3D extends Renderer {
         mat.opacity = Math.min(1, (1 - k) * 2.5);
       });
     };
+    if (e.k === 'shot' || e.k === 'super' || e.k === 'melee') {
+      this.playAction(e.id, 'attack', e.k === 'super' ? { weight: 1.3, timeScale: 0.75 } : { weight: 1 });
+    }
     if (e.k === 'shot') {
       // Muzzle flash + a little smoke from the barrel (lobs and punches get none).
       const kind = { shotgun: 'p', bullet: 'b', wave: 'w', bounce: 'j' }[e.w];
@@ -1400,16 +1587,23 @@ export class Renderer3D extends Renderer {
     const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
     camera.position.set(0, 2.1, 5.4);
     camera.lookAt(0, 0.75, 0);
-    let hero = null, piv = {}, current = null, running = false;
+    let hero = null, piv = {}, current = null, running = false, mixer = null, attackAct = null, lastT = 0, nextShow = 2;
     const stage = {
       setBrawler: (id) => {
         if (id === current || !this.models[id]) return;
         current = id;
         if (hero) scene.remove(hero);
-        hero = this.models[id].clone(true);
+        hero = SkeletonUtils.clone(this.models[id]);
         hero.scale.setScalar(CHAR_SCALE * 1.15);
         piv = {};
         hero.traverse((o) => { if (PIVOTS.includes(o.name)) piv[o.name] = o; if (o.isMesh) o.castShadow = true; });
+        const clips = this.clipsFor(id);
+        mixer = clips.idle ? new THREE.AnimationMixer(hero) : null;
+        if (mixer) {
+          mixer.clipAction(clips.idle).play();
+          // Show off: an attack now and then.
+          if (clips.attack) attackAct = mixer.clipAction(clips.attack, undefined, THREE.AdditiveAnimationBlendMode).setLoop(THREE.LoopOnce, 1);
+        }
         scene.add(hero);
       },
       start: () => {
@@ -1425,10 +1619,16 @@ export class Renderer3D extends Renderer {
           this.uniforms.time.value = t;
           if (hero) {
             hero.rotation.y = 0.35 * Math.sin(t * 0.5);
-            const s2 = Math.sin(t * 2.2);
-            if (piv.upper) piv.upper.position.y = 0.015 * s2;
-            if (piv.armLpiv) piv.armLpiv.rotation.x = 0.15 * s2;
+            if (mixer) {
+              mixer.update(Math.min(0.1, lastT ? t - lastT : 0));
+              if (attackAct && t > nextShow) { attackAct.reset().play(); nextShow = t + 3 + Math.random() * 2; }
+            } else {
+              const s2 = Math.sin(t * 2.2);
+              if (piv.upper) piv.upper.position.y = 0.015 * s2;
+              if (piv.armLpiv) piv.armLpiv.rotation.x = 0.15 * s2;
+            }
           }
+          lastT = t;
           gl.render(scene, camera);
         };
         requestAnimationFrame(loop);

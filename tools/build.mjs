@@ -27,6 +27,7 @@ await copyModule('build/three.module.min.js');
 for (const entry of [
   'examples/jsm/loaders/GLTFLoader.js',
   'examples/jsm/utils/BufferGeometryUtils.js',
+  'examples/jsm/utils/SkeletonUtils.js',
   'examples/jsm/postprocessing/EffectComposer.js',
   'examples/jsm/postprocessing/RenderPass.js',
   'examples/jsm/postprocessing/ShaderPass.js',
