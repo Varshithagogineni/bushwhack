@@ -1,5 +1,5 @@
 {
-  "name": "bushwhack",
+  "name": "rumble-reef",
   "version": "1.0.0",
   "description": "Real-time multiplayer island brawler. Peer-to-peer matches, Supabase accounts, Vercel hosting.",
   "type": "module",
