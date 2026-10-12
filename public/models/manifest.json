@@ -38,5 +38,13 @@
     "mask": "ground_mask.png",
     "min": -3,
     "size": 46
-  }
+  },
+  "animals": [
+    "seagull",
+    "rabbit",
+    "frog",
+    "duck",
+    "turtle",
+    "dolphin"
+  ]
 }

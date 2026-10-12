@@ -7,9 +7,11 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { MAP, MAP_TILES, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON, MODES, weaponOf, tileAt, JUMP_PADS, JUMP, GADGET, TURRET } from '/shared/game.js';
 import { Renderer } from './render.js';
+import { Wildlife, ANIMAL_PIVOTS } from './wildlife.js';
 
 const U = 1 / TILE; // game pixels -> world units (1 unit = 1 tile)
 const CHAR_SCALE = 1.25;
@@ -96,6 +98,7 @@ export class Renderer3D extends Renderer {
       this.composer.setPixelRatio(this.gl.getPixelRatio());
       this.composer.setSize(this.w, this.h);
       const px = this.gl.getPixelRatio();
+      this.bloom?.setSize(Math.round(this.w * px / 2), Math.round(this.h * px / 2));
       for (const pass of [this.tiltH, this.tiltV]) {
         pass.uniforms.texel.value.set(1 / (this.w * px), 1 / (this.h * px));
         pass.uniforms.amount.value = 1.8 * Math.min(1, this.h / 850); // gentler on short phone screens
@@ -130,7 +133,7 @@ export class Renderer3D extends Renderer {
   async load() {
     const manifest = await (await fetch('/models/manifest.json', { cache: 'no-cache' })).json();
     const loader = new GLTFLoader();
-    const names = [...manifest.characters, ...manifest.props, ...manifest.scenery];
+    const names = [...manifest.characters, ...manifest.props, ...manifest.scenery, ...(manifest.animals ?? [])];
     const gltfs = await Promise.all(names.map((n) => loader.loadAsync(`/models/${n}.glb`)));
     this.models = Object.fromEntries(names.map((n, i) => [n, gltfs[i].scene]));
     this.clips = Object.fromEntries(names.map((n, i) => [n, gltfs[i].animations ?? []]));
@@ -145,6 +148,7 @@ export class Renderer3D extends Renderer {
     this.outlineMat = new THREE.MeshBasicMaterial({ color: '#1b1430' });
     for (const scene of Object.values(this.models)) this.fixMaterials(scene);
     for (const id of manifest.characters) this.optimizeCharacter(this.models[id]);
+    for (const id of manifest.animals ?? []) this.optimizeCharacter(this.models[id], ANIMAL_PIVOTS);
     this.buildGround(albedo);
     this.buildWater(mask);
     this.buildPoison();
@@ -155,6 +159,8 @@ export class Renderer3D extends Renderer {
     this.buildPuffs();
     this.buildScorch();
     this.buildPollen();
+    this.wildlife = new Wildlife(this);
+    this.wildlife.build();
     this.setupPost();
     this.resize();
     this.ready = true;
@@ -164,6 +170,9 @@ export class Renderer3D extends Renderer {
     const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: this.coarse ? 2 : 4 });
     this.composer = new EffectComposer(this.gl, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    // Bloom: only genuinely bright things (muzzle flashes, explosions, glowing eyes, gems, sparks) glow.
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), this.coarse ? 0.45 : 0.6, 0.45, 0.88);
+    this.composer.addPass(this.bloom);
     const tilt = (dir) => new ShaderPass({
       uniforms: { tDiffuse: { value: null }, dir: { value: new THREE.Vector2(...dir) }, texel: { value: new THREE.Vector2() }, amount: { value: 2.6 } },
       vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
@@ -326,11 +335,11 @@ export class Renderer3D extends Renderer {
 
   // Merge each character into a handful of meshes (one per animated pivot), using vertex colours,
   // so six brawlers cost ~60 draw calls instead of ~500.
-  optimizeCharacter(root) {
+  optimizeCharacter(root, pivotNames = PIVOTS) {
     if ((() => { let k = false; root.traverse((o) => { if (o.isSkinnedMesh) k = true; }); return k; })()) return this.optimizeSkinned(root);
     root.updateMatrixWorld(true);
     const pivots = new Set();
-    root.traverse((o) => { if (PIVOTS.includes(o.name)) pivots.add(o); });
+    root.traverse((o) => { if (pivotNames.includes(o.name)) pivots.add(o); });
     const groups = new Map();
     const meshes = [];
     root.traverse((o) => { if (o.isMesh) meshes.push(o); });
@@ -345,12 +354,16 @@ export class Renderer3D extends Renderer {
       const key = `${pivot.uuid}|${kind}`;
       const geo = m.geometry.clone();
       geo.applyMatrix4(new THREE.Matrix4().copy(pivot.matrixWorld).invert().multiply(m.matrixWorld));
+      const ao = geo.attributes.color; // ambient occlusion baked in Blender (animals)
       const keep = map ? ['position', 'normal', 'uv'] : ['position', 'normal'];
       for (const name of Object.keys(geo.attributes)) if (!keep.includes(name)) geo.deleteAttribute(name);
       const c = glow ? mat.emissive.clone().multiplyScalar(1.6) : mat.color.clone();
       const n = geo.attributes.position.count;
       const col = new Float32Array(n * 3);
-      for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+      for (let i = 0; i < n; i++) {
+        const k = ao && !glow ? ao.getX(i) : 1;
+        col[i * 3] = c.r * k; col[i * 3 + 1] = c.g * k; col[i * 3 + 2] = c.b * k;
+      }
       geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
       if (!groups.has(key)) groups.set(key, { pivot, kind, map, geos: [] });
       groups.get(key).geos.push(geo.index ? geo : geo.setIndex([...Array(n).keys()]));
@@ -789,11 +802,17 @@ export class Renderer3D extends Renderer {
       new THREE.MeshBasicMaterial({ map: this.softDisc(), transparent: true, depthWrite: false }), N);
     im.renderOrder = 6;
     this.puffs = { im, alpha, n: N, next: 0, live: 0, p: Array.from({ length: N }, () => ({ life: 0, age: 1 })) };
+    // Additive pool for fire, sparks, embers and magic (blooms nicely).
+    const G = 200;
+    const glow = this.alphaPool(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ map: this.softDisc(), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }), G);
+    glow.im.renderOrder = 7;
+    this.glows = { im: glow.im, alpha: glow.alpha, n: G, next: 0, live: 0, p: Array.from({ length: G }, () => ({ life: 0, age: 1 })) };
   }
 
   // Spawn one particle (world units). Recycles the oldest slot when the pool is full.
   puff(x, y, z, o = {}) {
-    const P = this.puffs;
+    const P = o.glow ? this.glows : this.puffs;
     if (!P || (this.lowPower && P.live > 60)) return;
     const q = P.p[P.next];
     const i = P.next;
@@ -803,12 +822,16 @@ export class Renderer3D extends Renderer {
       s0: o.size ?? 0.15, s1: o.size1 ?? (o.size ?? 0.15) * 2, a0: o.alpha ?? 0.5, g: o.gravity ?? 0, drag: o.drag ?? 0.92,
       flutter: o.flutter ?? 0, floor: o.floor ?? 0.02, ph: Math.random() * 6.28,
     });
-    P.im.setColorAt(i, this.tmpColor.set(o.color ?? '#ffffff'));
+    P.im.setColorAt(i, this.tmpColor.set(o.color ?? '#ffffff').multiplyScalar(o.boost ?? 1));
     P.im.instanceColor.needsUpdate = true;
   }
 
   stepPuffs(dt) {
-    const P = this.puffs;
+    this.stepPool(this.puffs, dt);
+    this.stepPool(this.glows, dt);
+  }
+
+  stepPool(P, dt) {
     if (!P) return;
     const m = this.tmpM, pos = this.tmpV, sc = this.tmpS, q = this.camera.quaternion;
     let live = 0;
@@ -1176,6 +1199,17 @@ export class Renderer3D extends Renderer {
         } else e.superRing = null;
       }
       if (e.superRing) e.superRing.material.opacity = su >= 1 ? 0.65 + 0.35 * Math.sin(now / 80) : 0.9;
+      // Super ready: three golden motes circle you.
+      if (!e.orbs) {
+        e.orbs = new THREE.Group();
+        for (let i = 0; i < 3; i++) { const sp = new THREE.Sprite(this.glowMat('gold')); sp.scale.setScalar(0.35); e.orbs.add(sp); }
+        e.obj.add(e.orbs);
+      }
+      e.orbs.visible = su >= 1;
+      if (su >= 1) e.orbs.children.forEach((sp, i) => {
+        const a = now / 400 + (i / 3) * Math.PI * 2;
+        sp.position.set(Math.cos(a) * 0.6, 0.6 + Math.sin(now / 300 + i) * 0.2, Math.sin(a) * 0.6);
+      });
     }
   }
 
@@ -1221,6 +1255,74 @@ export class Renderer3D extends Renderer {
     a.setEffectiveTimeScale(timeScale);
     a.setEffectiveWeight(weight);
     a.play();
+  }
+
+  // ---------------------------------------------------------------- VFX helpers
+
+  glyphMat(ch, color) {
+    this.glyphMats ??= {};
+    const key = ch + color;
+    if (this.glyphMats[key]) return this.glyphMats[key];
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d');
+    g.font = 'bold 48px system-ui';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.shadowColor = color; g.shadowBlur = 12;
+    g.fillStyle = color;
+    g.fillText(ch, 32, 34);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const m = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    m.userData.shared = true;
+    this.glyphMats[key] = m;
+    return m;
+  }
+
+  // Floating symbol (music note, heal plus) that drifts up and fades.
+  glyph(ch, color, x, y, z, now, { life = 0.9, size = 0.35, drift = 0.6 } = {}) {
+    const spr = new THREE.Sprite(this.glyphMat(ch, color).clone());
+    spr.material.userData.shared = false;
+    spr.position.set(x, y, z);
+    spr.scale.setScalar(size);
+    const sway = (Math.random() - 0.5) * 0.6;
+    this.scene.add(spr);
+    this.fx.push({ obj: spr, born: now, life, update: (k) => {
+      spr.position.set(x + Math.sin(k * 6) * 0.08 + sway * k, y + k * drift, z);
+      spr.material.opacity = Math.min(1, (1 - k) * 2);
+      spr.scale.setScalar(size * (0.7 + 0.3 * Math.min(1, k * 4)));
+    } });
+  }
+
+  // A vertical column of light (super activation, respawn).
+  beam(x, z, color, now, { height = 3.2, radius = 0.45, life = 0.7 } = {}) {
+    if (!this.beamTex) {
+      const c = document.createElement('canvas');
+      c.width = 4; c.height = 64;
+      const g = c.getContext('2d');
+      const grd = g.createLinearGradient(0, 0, 0, 64);
+      grd.addColorStop(0, 'rgba(255,255,255,0)');
+      grd.addColorStop(0.7, 'rgba(255,255,255,0.55)');
+      grd.addColorStop(1, 'rgba(255,255,255,1)');
+      g.fillStyle = grd; g.fillRect(0, 0, 4, 64);
+      this.beamTex = new THREE.CanvasTexture(c);
+    }
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, 24, 1, true),
+      new THREE.MeshBasicMaterial({ map: this.beamTex, color: new THREE.Color(color).multiplyScalar(1.8), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+    mesh.position.set(x, height / 2, z);
+    this.scene.add(mesh);
+    this.fx.push({ obj: mesh, born: now, life, update: (k) => {
+      mesh.scale.set(1 - 0.6 * k, 0.6 + 0.4 * Math.min(1, k * 5), 1 - 0.6 * k);
+      mesh.material.opacity = (1 - k) * Math.min(1, k * 8);
+    } });
+  }
+
+  sparks(x, y, z, { n = 6, color = '#fff3c4', speed = 3, life = 0.28, size = 0.07, up = 1.5, boost = 3 } = {}) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, v = speed * (0.5 + Math.random());
+      this.puff(x, y, z, { glow: true, vx: Math.cos(a) * v, vy: up * (0.5 + Math.random()), vz: Math.sin(a) * v, gravity: 6, drag: 0.9, size, size1: size * 0.3, life, alpha: 1, color, boost });
+    }
   }
 
   rustleBush(b, amount) {
@@ -1335,9 +1437,28 @@ export class Renderer3D extends Renderer {
       }
       this.flashes.set(e.id, now);
       this.floaters.push({ ...e, born: now, life: 0.9 });
+      if (this.ready && (e.src === 'hit' || e.src === 'haunt')) {
+        const ent = this.players.get(e.id);
+        const px = ent ? ent.obj.position.x : e.x * U, pz = ent ? ent.obj.position.z : e.y * U;
+        this.sparks(px, 0.7, pz, { n: e.a > 900 ? 10 : 6, color: e.src === 'haunt' ? '#c9a8ff' : '#fff1c2', speed: e.a > 900 ? 4 : 3 });
+        const fl = new THREE.Sprite(this.glowMat('b'));
+        fl.position.set(px, 0.7, pz);
+        this.scene.add(fl);
+        this.fx.push({ obj: fl, born: now, life: 0.12, update: (k) => fl.scale.setScalar(0.5 + 0.9 * k) });
+      }
       return;
     }
-    if (e.k === 'cube' || e.k === 'gem') { this.floaters.push({ ...e, born: now, life: 0.9 }); return; }
+    if (e.k === 'cube' || e.k === 'gem') {
+      this.floaters.push({ ...e, born: now, life: 0.9 });
+      if (this.ready) {
+        const col = e.k === 'gem' ? '#d9a8ff' : '#8dffb8';
+        for (let i = 0; i < 10; i++) {
+          const a = (i / 10) * Math.PI * 2;
+          this.puff(e.x * U + Math.cos(a) * 0.25, 0.3, e.y * U + Math.sin(a) * 0.25, { glow: true, vx: Math.cos(a) * 0.6, vy: 1.6 + Math.random(), vz: Math.sin(a) * 0.6, size: 0.09, size1: 0.02, life: 0.7, alpha: 1, color: col, boost: 3, drag: 0.94 });
+        }
+      }
+      return;
+    }
     if (!this.ready) return;
     const at = new THREE.Vector3(e.x * U, 0, e.y * U);
     const add = (obj, life, update) => { this.scene.add(obj); this.fx.push({ obj, born: now, life, update }); };
@@ -1384,6 +1505,18 @@ export class Renderer3D extends Renderer {
     if (e.k === 'shot' || e.k === 'super' || e.k === 'melee') {
       this.playAction(e.id, 'attack', e.k === 'super' ? { weight: 1.3, timeScale: 0.75 } : { weight: 1 });
     }
+    if (e.k === 'shot' && e.w === 'lunge') {
+      // Kit's kama slash: a crescent of light sweeping along the dash.
+      const ent = this.players.get(e.id);
+      if (ent) {
+        const a = e.a ?? (Math.PI / 2 - ent.yaw);
+        const arc = new THREE.Mesh(new THREE.RingGeometry(0.35, 0.75, 32, 1, -1.2, 2.4).rotateX(-Math.PI / 2),
+          new THREE.MeshBasicMaterial({ color: new THREE.Color('#e9d6ff').multiplyScalar(2), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide }));
+        arc.position.set(ent.obj.position.x + Math.cos(a) * 1.0, 0.55, ent.obj.position.z + Math.sin(a) * 1.0);
+        arc.rotation.y = -a;
+        add(arc, 0.25, (k) => { arc.material.opacity = 0.9 * (1 - k); arc.scale.setScalar(0.8 + 0.5 * k); });
+      }
+    }
     if (e.k === 'shot') {
       // Muzzle flash + a little smoke from the barrel (lobs and punches get none).
       const kind = { shotgun: 'p', bullet: 'b', wave: 'w', bounce: 'j' }[e.w];
@@ -1398,6 +1531,21 @@ export class Renderer3D extends Renderer {
       return;
     }
     if (e.k === 'boom' || e.k === 'meteor') {
+      // Fireball: hot core flash, rolling flames, then embers drifting down.
+      const big = e.big || e.k === 'meteor';
+      const R = e.r * U;
+      const flash = new THREE.Sprite(this.glowMat('meteor'));
+      flash.position.copy(at).setY(0.5);
+      add(flash, 0.18, (k) => { flash.scale.setScalar(R * (2.5 + 2 * k)); flash.material.opacity = 1 - k; });
+      for (let i = 0; i < (big ? 18 : 11); i++) {
+        const a = Math.random() * 6.28, r = Math.random() * R * 0.6;
+        const col = ['#fff1a8', '#ffbe55', '#ff8a2a', '#ff5a1f'][i % 4];
+        this.puff(at.x + Math.cos(a) * r, 0.25, at.z + Math.sin(a) * r, { glow: true, vx: Math.cos(a) * 0.8, vy: 1.4 + Math.random() * 1.6, vz: Math.sin(a) * 0.8, size: 0.25 + R * 0.3, size1: 0.6 + R * 0.6, life: 0.4 + Math.random() * 0.35, alpha: 0.9, color: col, boost: 2.2, drag: 0.88 });
+      }
+      for (let i = 0; i < (big ? 16 : 9); i++) {
+        const a = Math.random() * 6.28, v = 1.5 + Math.random() * 2.5;
+        this.puff(at.x, 0.4, at.z, { glow: true, vx: Math.cos(a) * v, vy: 2.5 + Math.random() * 2.5, vz: Math.sin(a) * v, gravity: 5, drag: 0.97, size: 0.05, size1: 0.03, life: 1 + Math.random() * 0.6, alpha: 1, color: '#ffb347', boost: 3, flutter: 0.3 });
+      }
       this.addScorch(at.x, at.z, e.r * U * 0.8, now);
       this.flashLight(at.x, at.z, e.big || e.k === 'meteor', now);
       if (tileAt(e.x, e.y) === 'w') this.splash(e.x, e.y, now);
@@ -1478,6 +1626,7 @@ export class Renderer3D extends Renderer {
       if (e.k === 'gadget') this.gadgetPops.set(e.id, { at: now, g: e.g });
     } else if (e.k === 'heal') {
       this.floaters.push({ ...e, born: now, life: 1.1 });
+      for (let i = 0; i < 3; i++) this.glyph('+', '#7dffb0', at.x + (i - 1) * 0.25, 0.6 + i * 0.15, at.z, now, { life: 1 + i * 0.15, size: 0.3 });
       for (let i = 0; i < 6; i++) {
         const a = Math.random() * 6.28;
         this.puff(at.x + Math.cos(a) * 0.3, 0.4, at.z + Math.sin(a) * 0.3, { vy: 1.2, size: 0.12, size1: 0.05, life: 0.8, alpha: 0.9, color: '#7dffb0', drag: 0.95 });
@@ -1529,7 +1678,20 @@ export class Renderer3D extends Renderer {
         glow.position.copy(at).setY(0.8);
         add(glow, 1.8, (k) => { glow.scale.setScalar(2 + 3 * Math.sin(Math.PI * k)); glow.material.opacity = 1 - k; });
       }
-    } else if (e.k === 'haunt' || e.k === 'super' || e.k === 'spawn' || e.k === 'gemspawn') {
+    } else if (e.k === 'super' || e.k === 'spawn') {
+      // Power-up column of light with rising motes, plus the ground ring.
+      const color = e.k === 'super' ? '#ffd23c' : '#7fe3c0';
+      this.beam(at.x, at.z, color, now, e.k === 'super' ? { height: 3.4, radius: 0.5, life: 0.7 } : { height: 4.5, radius: 0.35, life: 0.9 });
+      for (let i = 0; i < 14; i++) {
+        const a = Math.random() * 6.28, r = 0.2 + Math.random() * 0.4;
+        this.puff(at.x + Math.cos(a) * r, 0.1 + Math.random() * 0.4, at.z + Math.sin(a) * r, { glow: true, vy: 2 + Math.random() * 2, size: 0.07, size1: 0.02, life: 0.8, alpha: 1, color, boost: 3, drag: 0.98 });
+      }
+      if (e.k === 'super' && e.w === 'charge') burst(10, '#c9b38a', 2, 0.08, 1.5, 0.7);
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 48).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false }));
+      ring.position.copy(at).setY(0.06);
+      add(ring, 0.55, (k) => { ring.scale.setScalar(0.9 * (0.3 + k)); ring.material.opacity = 1 - k; });
+    } else if (e.k === 'haunt' || e.k === 'gemspawn') {
       if (e.k === 'super' && e.w === 'charge') burst(10, '#c9b38a', 2, 0.08, 1.5, 0.7); // dust kicked up by Bulldoze
       const ring = new THREE.Mesh(new THREE.RingGeometry(0.85, 1, 48).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: { haunt: '#be96ff', super: '#ffd63c', spawn: '#7fe3c0', gemspawn: '#c97bff' }[e.k], transparent: true, depthWrite: false }));
@@ -1681,7 +1843,8 @@ export class Renderer3D extends Renderer {
       this.kick.x += this.kickV.x * dt;
       this.kick.y += this.kickV.y * dt;
     }
-    this.camTarget.set(v.cam.x * U + this.kick.x, 0, v.cam.y * U + this.kick.y);
+    const cam = this.camOverride ?? v.cam; // camOverride: automated visual tests only
+    this.camTarget.set(cam.x * U + this.kick.x, 0, cam.y * U + this.kick.y);
     const pitch = THREE.MathUtils.degToRad(53);
     this.camera.position.set(this.camTarget.x, this.camDist * Math.sin(pitch), this.camTarget.z + this.camDist * Math.cos(pitch));
     this.camera.lookAt(this.camTarget);
@@ -1848,6 +2011,8 @@ export class Renderer3D extends Renderer {
         o.streak.rotation.y = -Math.atan2(p.y - o.py, p.x - o.px);
       }
       o.px = p.x; o.py = p.y;
+      if (p.k === 'w' && Math.random() < dt * 2.5) this.glyph(Math.random() < 0.5 ? '♪' : '♫', '#bfffe6', p.x * U, 0.8, p.y * U, now, { life: 0.8, size: 0.28, drift: 0.5 });
+      if (p.k === 'j' && Math.random() < dt * 20) this.puff(p.x * U, 0.75, p.y * U, { glow: true, vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2, vz: (Math.random() - 0.5) * 2, size: 0.05, size1: 0.01, life: 0.2, alpha: 1, color: '#d8ff9a', boost: 3 });
       o.obj.position.set(p.x * U, p.k === 'o' ? 0.26 : 0.75, p.y * U);
       if (p.k === 'o') o.obj.rotation.x += 0.4; // the Bowler rolls
       if (tileAt(p.x, p.y) === '*') {
@@ -1937,6 +2102,16 @@ export class Renderer3D extends Renderer {
       f.update(k);
       return true;
     });
+    if (v.poison < POISON.startR - 1 && dt > 0 && Math.random() < dt * 10) {
+      const R = v.poison * U, cx = CENTER * U, cz = CENTER * U;
+      const toCam = Math.atan2(this.camTarget.z - cz, this.camTarget.x - cx);
+      const a = toCam + (Math.random() - 0.5) * Math.min(Math.PI, 16 / Math.max(R, 1));
+      const r = R + Math.random() * 1.2;
+      const gx = cx + Math.cos(a) * r, gz = cz + Math.sin(a) * r;
+      if (Math.hypot(gx - this.camTarget.x, gz - this.camTarget.z) < 12) {
+        this.puff(gx, 0.3 + Math.random() * 0.6, gz, { vx: -Math.cos(a) * 0.3, vy: 0.15, vz: -Math.sin(a) * 0.3, size: 0.6, size1: 1.6, life: 2.2, alpha: 0.28, color: '#7ed957', drag: 0.99 });
+      }
+    }
     this.stepPuffs(Math.min(dt, 0.05));
     this.stepScorch(now);
     this.stepPollen(t);
@@ -1957,6 +2132,7 @@ export class Renderer3D extends Renderer {
     }
 
     this.animateWildlife(t);
+    this.wildlife?.update(dt, t, v.players, now);
     if (this.composer) this.composer.render(dt);
     else this.gl.render(this.scene, this.camera);
     this.watchPerf(dt);

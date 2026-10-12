@@ -32,5 +32,6 @@ for (const entry of [
   'examples/jsm/postprocessing/RenderPass.js',
   'examples/jsm/postprocessing/ShaderPass.js',
   'examples/jsm/postprocessing/OutputPass.js',
+  'examples/jsm/postprocessing/UnrealBloomPass.js',
 ]) await copyModule(entry);
 console.log(`Built ${OUT}/ with ${copied.size} Three.js modules`);

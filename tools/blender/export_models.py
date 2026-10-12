@@ -560,6 +560,16 @@ def run(manifest):
         manifest.setdefault(group, [])
         if name not in manifest[group]:
             manifest[group].append(name)
+    # Wildlife (see animals.py): pivot hierarchies with baked AO, animated procedurally by the game.
+    animal_ns = dict(globals(), dome=L['dome'])
+    exec(compile(open(os.path.join(HERE, 'animals.py')).read(), 'animals.py', 'exec'), animal_ns)
+    for name in animal_ns['ANIMALS']:
+        if ONLY and name not in ONLY and 'animals' not in ONLY:
+            continue
+        animal_ns['export_animal'](name, OUT)
+        manifest.setdefault('animals', [])
+        if name not in manifest['animals']:
+            manifest['animals'].append(name)
     if not ONLY or 'ground' in ONLY:
         bake_ground(manifest)
 
