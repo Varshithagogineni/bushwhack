@@ -26,6 +26,33 @@
       "dirs": 16,
       "frames": 4,
       "scale": 0.5
+    },
+    "melo": {
+      "file": "melo.webp",
+      "cell": 224,
+      "ax": 112,
+      "ay": 178,
+      "dirs": 16,
+      "frames": 4,
+      "scale": 0.5
+    },
+    "kit": {
+      "file": "kit.webp",
+      "cell": 224,
+      "ax": 112,
+      "ay": 178,
+      "dirs": 16,
+      "frames": 4,
+      "scale": 0.5
+    },
+    "tink": {
+      "file": "tink.webp",
+      "cell": 224,
+      "ax": 112,
+      "ay": 178,
+      "dirs": 16,
+      "frames": 4,
+      "scale": 0.5
     }
   },
   "hero": {
@@ -114,5 +141,12 @@
         "ay": 136
       }
     }
+  },
+  "icons": {
+    "gem": "icons/gem.png",
+    "star": "icons/star.png",
+    "cube": "icons/cube.png",
+    "drink": "icons/drink.png",
+    "trophy": "icons/trophy.png"
   }
 }

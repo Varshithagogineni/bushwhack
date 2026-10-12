@@ -525,7 +525,7 @@ def bake_ground(manifest):
 
 def run(manifest):
     jobs = []
-    for cid in ('brick', 'vex', 'boom'):
+    for cid in ('brick', 'vex', 'boom', 'melo', 'kit', 'tink'):
         jobs.append((cid, lambda cid=cid: L['CHARACTERS'][cid](), False, 'characters'))
     for v in range(3):
         jobs.append((f'wall{v}', lambda v=v: L['build_wall'](v, stretch=False), True, 'props'))
@@ -537,6 +537,9 @@ def run(manifest):
     jobs.append(('crate', lambda: L['build_crate'](stretch=False), True, 'props'))
     jobs.append(('cube', L['build_cube'], True, 'props'))
     jobs.append(('ghost', L['build_ghost'], True, 'props'))
+    jobs.append(('turret', L['build_turret'], True, 'props'))
+    jobs.append(('gem', L['build_gem'], True, 'props'))
+    jobs.append(('drink', L['build_drink'], True, 'props'))
     jobs.append(('starfish', build_starfish, True, 'scenery'))
     jobs.append(('crab', build_crab, True, 'scenery'))
     for name, build, join, group in jobs:

@@ -76,6 +76,9 @@ function noise(dur, { vol = 0.3, freq = 1200, q = 0.8, delay = 0 } = {}) {
 export const sfx = {
   shot(w, v = 1) {
     if (w === 'shotgun') noise(0.18, { vol: 0.35 * v, freq: 1800 });
+    else if (w === 'wave') { tone(392, 0.25, { type: 'triangle', vol: 0.14 * v, to: 523 }); tone(587, 0.25, { type: 'sine', vol: 0.08 * v }); }
+    else if (w === 'bounce') tone(700, 0.15, { type: 'square', vol: 0.1 * v, to: 1400 });
+    else if (w === 'lunge') noise(0.14, { vol: 0.3 * v, freq: 3000, q: 0.5 });
     else if (w === 'bullet') tone(900, 0.12, { type: 'sawtooth', vol: 0.12 * v, to: 300 });
     else tone(300, 0.2, { type: 'triangle', vol: 0.2 * v, to: 600 });
   },
@@ -97,6 +100,9 @@ export const sfx = {
   drink(v = 1) { noise(0.12, { vol: 0.25 * v, freq: 4000 }); [660, 880, 1100].forEach((f, i) => tone(f, 0.08, { type: 'square', vol: 0.1 * v, delay: 0.08 + i * 0.05 })); },
   jump(v = 1) { tone(220, 0.35, { type: 'sine', vol: 0.22 * v, to: 880 }); },
   shroom(v = 1) { tone(520, 0.25, { type: 'sine', vol: 0.12 * v, to: 780 }); },
+  chorus(v = 1) { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.3, { type: 'sine', vol: 0.12 * v, delay: i * 0.06 })); },
+  zap(v = 1) { tone(1400, 0.08, { type: 'sawtooth', vol: 0.1 * v, to: 300 }); noise(0.08, { vol: 0.15 * v, freq: 5000 }); },
+  build(v = 1) { [330, 440, 660].forEach((f, i) => tone(f, 0.07, { type: 'square', vol: 0.1 * v, delay: i * 0.08 })); noise(0.1, { vol: 0.2 * v, freq: 900, delay: 0.25 }); },
   win() { [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.25, { type: 'triangle', vol: 0.18, delay: i * 0.12 })); },
   lose() { [392, 330, 262].forEach((f, i) => tone(f, 0.3, { type: 'triangle', vol: 0.15, delay: i * 0.15 })); },
 };

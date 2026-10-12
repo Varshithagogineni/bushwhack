@@ -22,7 +22,7 @@
 
       <div id="accountBar" class="account-bar">
         <div id="guestBar" class="account-row">
-          <span>Playing as a guest. Sign in to earn 🏆 trophies and badges.</span>
+          <span>Playing as a guest. Sign in to earn <img class="ico" src="/assets/icons/trophy.png" alt=""> trophies and badges.</span>
           <button id="signInBtn" class="btn small secondary">Sign in</button>
         </div>
         <div id="userBar" class="account-row hidden">
@@ -50,14 +50,15 @@
     <section class="panel howto">
       <h2>How to play</h2>
       <ul>
-        <li><b>Three modes:</b> ☠ Showdown (last one standing), 💎 Gem Grab (2 teams, hold 10 gems), ⭐ Bounty (knockouts earn stars).</li>
+        <li><b>Three modes:</b> ☠ Showdown (last one standing), <img class="ico" src="/assets/icons/gem.png" alt=""> Gem Grab (2 teams, hold 10 gems), <img class="ico" src="/assets/icons/star.png" alt=""> Bounty (knockouts earn stars).</li>
         <li><b>Showdown poison</b> closes in from the edges after 30 seconds. Stay inside the circle.</li>
         <li><b>Bushes hide you</b> from anyone who isn't right next to you, until you shoot.</li>
         <li><b>Break crates</b> for power cubes: +health and +damage. Knocked-out brawlers drop theirs too.</li>
         <li><b>Land hits to charge your Super</b> (yellow ring under you), then unleash it.</li>
         <li><b>Knocked out? You're not done.</b> Come back as a 👻 ghost, float through walls and drop haunts that slow and hurt the survivors.</li>
+        <li><b>Six brawlers:</b> Brick the tank, Vex the sharpshooter, Boom the thrower, <b>Melo</b> the healer (sound waves, a healing song), <b>Kit</b> the assassin (dash-slash, Shadow Leap, smoke cloak) and <b>Tink</b> the builder (bouncing spark orb, a turret that shoots for you).</li>
         <li><b>Two weapons each.</b> Swap any time: Brick's 💥 Blunderbuss or 👊 Haymaker punch, Vex's 🎯 Bamboo Rifle or 🪶 Fan Bolts, Boom's 💣 Clay Bomb or 🎳 Bowler. Big hits <b>knock players back</b>, so shove them into the poison!</li>
-        <li><b>Gadgets:</b> 3 per match. Brick heals 🩹, Vex blinks 💨, Boom drops a pot bomb 🫙. <b>Jump pads</b> fling you over walls.</li>
+        <li><b>Gadgets:</b> 3 per match. Brick heals 🩹, Vex blinks 💨, Boom drops a pot bomb 🫙, Melo refills ammo 🔁, Kit vanishes 🌀, Tink shocks 💥. <b>Jump pads</b> fling you over walls.</li>
         <li><b>Match twists</b> shake up every game: ☄️ meteor showers, ⚡ energy drinks (double damage) or 🍄 healing shrooms.</li>
         <li><b>Ammo</b> (3 bars under you) refills on its own. Health heals when you stop fighting.</li>
       </ul>
@@ -104,6 +105,7 @@
         <button id="removeBotBtn" class="btn ghost">Remove bot</button>
         <button id="startBtn" class="btn primary big">Start match</button>
       </div>
+      <button id="readyBtn" class="btn primary big ready-btn hidden">✔ Ready</button>
       <p id="lobbyStatus" class="hint center"></p>
       <div class="invite">
         <div id="qr" class="qr hidden" aria-label="QR code for the invite link"></div>
@@ -148,7 +150,7 @@
       <button id="profileBack" class="btn small ghost">← Back</button>
       <div class="profile-title">
         <h1 id="pName"></h1>
-        <div class="profile-trophies">🏆 <span id="pTrophies">0</span></div>
+        <div class="profile-trophies"><img class="ico" src="/assets/icons/trophy.png" alt=""> <span id="pTrophies">0</span></div>
       </div>
     </section>
     <section class="panel">

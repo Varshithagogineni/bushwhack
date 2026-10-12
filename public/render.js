@@ -335,6 +335,14 @@ export class Renderer {
       ctx.fillStyle = '#fff3c4';
       ctx.save(); ctx.translate(pad.x, pad.y); ctx.rotate(Math.atan2(pad.dy, pad.dx)); ctx.fillText('»', 0, 8); ctx.restore();
     }
+    for (const t of v.turrets ?? []) {
+      ctx.fillStyle = '#b8913a';
+      ctx.beginPath(); ctx.arc(t.x, t.y, 24, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#4a4a50'; ctx.lineWidth = 8;
+      ctx.beginPath(); ctx.moveTo(t.x, t.y); ctx.lineTo(t.x + Math.cos(t.a) * 34, t.y + Math.sin(t.a) * 34); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(t.x - 26, t.y - 40, 52, 8);
+      ctx.fillStyle = '#ffd34d'; ctx.fillRect(t.x - 25, t.y - 39, 50 * (t.h / t.m), 6);
+    }
     for (const z of v.zones ?? []) {
       const meteor = z.k === 'm';
       ctx.fillStyle = meteor ? `rgba(255,42,26,${0.2 + 0.25 * Math.max(0, 1 - z.l / 1.6)})` : 'rgba(95,224,164,0.28)';
@@ -435,7 +443,7 @@ export class Renderer {
     // Bullets
     for (const p of v.projs) {
       if (p.k === 'l') continue;
-      const style = { b: ['#fff3a8', '#ffe14d', 9], p: ['#ffb347', '#ff8a00', 7], v: ['#c9f6ff', '#28c8ff', 10], o: ['#d98a5a', '#b5653a', 15] }[p.k];
+      const style = { b: ['#fff3a8', '#ffe14d', 9], p: ['#ffb347', '#ff8a00', 7], v: ['#c9f6ff', '#28c8ff', 10], o: ['#d98a5a', '#b5653a', 15], w: ['#d9fff0', '#5fe0b0', 7], j: ['#f0ffd0', '#b8ff6a', 11] }[p.k] ?? ['#ffffff', '#ffffff', 8];
       ctx.fillStyle = style[0];
       ctx.shadowColor = style[1];
       ctx.shadowBlur = 14;
@@ -516,19 +524,21 @@ export class Renderer {
     ctx.lineWidth = 2;
     const kind = a.super ? b.super.kind : b.attack;
     const range = a.super ? b.super.range : b.range;
-    if (kind === 'shotgun' || kind === 'volley' || kind === 'melee') {
+    if (kind === 'heal') {
+      ctx.beginPath(); ctx.arc(0, 0, range, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    } else if (kind === 'shotgun' || kind === 'volley' || kind === 'melee' || kind === 'wave') {
       const spread = kind === 'volley' ? b.super.spread : kind === 'melee' ? b.arc * 2 : b.spread;
       ctx.beginPath();
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, range, a.angle - spread / 2, a.angle + spread / 2);
       ctx.closePath();
       ctx.fill();
-    } else if (kind === 'bullet' || kind === 'charge') {
+    } else if (kind === 'bullet' || kind === 'charge' || kind === 'lunge' || kind === 'bounce') {
       ctx.rotate(a.angle);
-      const w = kind === 'charge' ? 26 : 9;
+      const w = kind === 'charge' || kind === 'lunge' ? 26 : 9;
       ctx.fillRect(R, -w, range - R, w * 2);
     } else {
-      const blast = a.super ? b.super.blast : b.blast;
+      const blast = (a.super ? b.super.blast : b.blast) ?? 34;
       const d = Math.min(range, Math.max(80, a.dist));
       const tx = Math.cos(a.angle) * d, ty = Math.sin(a.angle) * d;
       ctx.setLineDash([6, 10]);

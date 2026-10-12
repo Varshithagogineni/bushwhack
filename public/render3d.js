@@ -7,7 +7,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { MAP, MAP_TILES, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON, MODES, weaponOf, tileAt, JUMP_PADS, JUMP, GADGET } from '/shared/game.js';
+import { MAP, MAP_TILES, TILE, CENTER, BRAWLERS, MAX_AMMO, EMOTES, HAUNT, POISON, MODES, weaponOf, tileAt, JUMP_PADS, JUMP, GADGET, TURRET } from '/shared/game.js';
 import { Renderer } from './render.js';
 
 const U = 1 / TILE; // game pixels -> world units (1 unit = 1 tile)
@@ -58,6 +58,10 @@ export class Renderer3D extends Renderer {
     this.floaters = [];
     this.swaps = new Map(); // player id -> { at, w }: recent weapon swaps (spin + icon)
     this.zoneObjs = new Map();
+    this.turretObjs = new Map();
+    // Blender-rendered collectible icons for the overlay (gems, stars, power cubes).
+    this.icons = {};
+    for (const n of ['gem', 'star', 'cube', 'drink', 'trophy']) { const img = new Image(); img.src = `/assets/icons/${n}.png`; this.icons[n] = img; }
     this.gadgetPops = new Map(); // player id -> { at, g }: gadget icon over their head
     this.padObjs = [];
     this.koBodies = new Map(); // player id -> knocked-out body still tumbling (don't redraw them)
@@ -1011,7 +1015,7 @@ export class Renderer3D extends Renderer {
     if (e.piv.armLpiv) e.piv.armLpiv.rotation.x = -0.45 * s;
     if (e.piv.upper) e.piv.upper.position.y = Math.abs(Math.cos(e.phase)) * 0.035 * e.walk + Math.sin(now / 500) * 0.008;
     for (const m of e.mats) {
-      m.opacity = p.bush ? (p.isMe ? 0.55 : 0.4) : 1;
+      m.opacity = p.cloak ? (p.isMe ? 0.4 : 0.25) : p.bush ? (p.isMe ? 0.55 : 0.4) : 1;
       // Only blend while hidden in a bush; opaque rendering keeps the model's parts sorted correctly.
       if (m.transparent !== m.opacity < 1) { m.transparent = m.opacity < 1; m.needsUpdate = true; }
       m.emissive?.setScalar(flash * 0.9);
@@ -1195,7 +1199,7 @@ export class Renderer3D extends Renderer {
     };
     if (e.k === 'shot') {
       // Muzzle flash + a little smoke from the barrel (lobs and punches get none).
-      const kind = { shotgun: 'p', bullet: 'b' }[e.w];
+      const kind = { shotgun: 'p', bullet: 'b', wave: 'w', bounce: 'j' }[e.w];
       const ent = this.players.get(e.id);
       if (!kind || !ent) return;
       const a = e.a ?? (Math.PI / 2 - ent.yaw), c = Math.cos(a), sn = Math.sin(a);
@@ -1287,6 +1291,47 @@ export class Renderer3D extends Renderer {
       if (e.k === 'gadget') this.gadgetPops.set(e.id, { at: now, g: e.g });
     } else if (e.k === 'heal') {
       this.floaters.push({ ...e, born: now, life: 1.1 });
+      for (let i = 0; i < 6; i++) {
+        const a = Math.random() * 6.28;
+        this.puff(at.x + Math.cos(a) * 0.3, 0.4, at.z + Math.sin(a) * 0.3, { vy: 1.2, size: 0.12, size1: 0.05, life: 0.8, alpha: 0.9, color: '#7dffb0', drag: 0.95 });
+      }
+    } else if (e.k === 'chorus' || e.k === 'shock') {
+      // Melo's healing song / Tink's shock pulse: an expanding ring over the whole radius.
+      const color = e.k === 'chorus' ? '#7dffb0' : '#9fe3ff';
+      const R = e.r * U;
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 56).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false }));
+      ring.position.copy(at).setY(0.08);
+      add(ring, 0.6, (k) => { ring.scale.setScalar(R * (0.2 + 0.8 * Math.sqrt(k))); ring.material.opacity = 0.9 * (1 - k); });
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color, transparent: true, depthWrite: false, opacity: 0.25 }));
+      disc.position.copy(at).setY(0.06);
+      add(disc, 0.6, (k) => { disc.scale.setScalar(R * Math.sqrt(k)); disc.material.opacity = 0.25 * (1 - k); });
+      if (e.k === 'shock') { burst(10, '#9fe3ff', 3, 0.04, 2, 0.4); this.flashLight(at.x, at.z, false, now); }
+      else for (let i = 0; i < 10; i++) {
+        const a = Math.random() * 6.28, r = Math.random() * R;
+        this.puff(at.x + Math.cos(a) * r, 0.3, at.z + Math.sin(a) * r, { vy: 1.4, size: 0.14, size1: 0.06, life: 1, alpha: 0.9, color: '#bfffd8', flutter: 0.4 });
+      }
+    } else if (e.k === 'zap') {
+      // Spark orb jumping to the next enemy: a jagged bolt.
+      const pts = [];
+      const ax = e.x * U, az = e.y * U, bx = e.tx * U, bz = e.ty * U;
+      for (let i = 0; i <= 8; i++) {
+        const k = i / 8, j = i === 0 || i === 8 ? 0 : (Math.random() - 0.5) * 0.35;
+        pts.push(new THREE.Vector3(ax + (bx - ax) * k + j, 0.75 + (Math.random() - 0.5) * 0.2, az + (bz - az) * k + j));
+      }
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: '#d8ff9a', transparent: true }));
+      add(line, 0.25, (k) => { line.material.opacity = 1 - k; });
+    } else if (e.k === 'build') {
+      burst(8, '#b8913a', 1.6, 0.06, 2.5, 0.6);
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * 6.28;
+        this.puff(at.x + Math.cos(a) * 0.3, 0.06, at.z + Math.sin(a) * 0.3, { vx: Math.cos(a) * 1.4, vy: 0.4, vz: Math.sin(a) * 1.4, size: 0.2, size1: 0.45, life: 0.5, alpha: 0.4, color: '#d8c39a' });
+      }
+    } else if (e.k === 'tshot') {
+      const tu = [...this.turretObjs.values()].find((o) => Math.hypot(o.obj.position.x - at.x, o.obj.position.z - at.z) < 0.2);
+      const yaw = tu?.yaw ?? 0, dx = Math.sin(yaw), dz = Math.cos(yaw);
+      const flash = new THREE.Sprite(this.glowMat('j'));
+      flash.position.set(at.x + dx * 0.55, 0.65, at.z + dz * 0.55);
+      add(flash, 0.08, (k) => flash.scale.setScalar(0.9 - 0.5 * k));
     } else if (e.k === 'win') {
       const champ = this.players.get(e.id);
       if (champ) {
@@ -1510,7 +1555,15 @@ export class Renderer3D extends Renderer {
     // Power cubes
     this.syncMap(this.cubeObjs, v.cubes, (c) => {
       let obj;
-      if (c.k === 'drink') {
+      if (c.k === 'drink' && this.models.drink) {
+        obj = new THREE.Group();
+        const can = this.models.drink.clone(true);
+        can.scale.setScalar(1.15);
+        can.position.y = -0.3;
+        const glow = new THREE.Sprite(this.glowMat('drink'));
+        glow.scale.setScalar(1.6);
+        obj.add(can, glow);
+      } else if (c.k === 'drink') {
         // Energy Drink: a glowing can.
         obj = new THREE.Group();
         const can = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.42, 20), new THREE.MeshStandardMaterial({ color: '#ff8a1f', roughness: 0.35, metalness: 0.4, emissive: '#7a2c00' }));
@@ -1536,6 +1589,8 @@ export class Renderer3D extends Renderer {
       p: new THREE.MeshBasicMaterial({ color: '#ffb347' }),
       v: new THREE.MeshBasicMaterial({ color: '#7fe9ff' }),
       o: new THREE.MeshStandardMaterial({ color: '#b5653a', roughness: 0.7 }),
+      w: new THREE.MeshBasicMaterial({ color: '#bfffe6' }),
+      j: new THREE.MeshBasicMaterial({ color: '#d8ff9a' }),
       bomb: new THREE.MeshStandardMaterial({ color: '#222228', roughness: 0.3 }),
       bigbomb: new THREE.MeshStandardMaterial({ color: '#7a1010', roughness: 0.3 }),
       zone: new THREE.MeshBasicMaterial({ color: '#ff3b3b', transparent: true, opacity: 0.22, depthWrite: false }),
@@ -1559,7 +1614,7 @@ export class Renderer3D extends Renderer {
         this.scene.add(obj);
         return { obj, lob: true, disposable: true };
       }
-      const r = p.k === 'p' ? 0.09 : p.k === 'o' ? 0.24 : 0.12;
+      const r = p.k === 'p' ? 0.09 : p.k === 'o' ? 0.24 : p.k === 'w' ? 0.08 : p.k === 'j' ? 0.15 : 0.12;
       this.coreGeos ??= {};
       this.coreGeos[p.k] ??= Object.assign(new THREE.SphereGeometry(r, 10, 8), { userData: { shared: true } });
       const core = new THREE.Mesh(this.coreGeos[p.k], bulletMats[p.k]);
@@ -1606,12 +1661,31 @@ export class Renderer3D extends Renderer {
       o.wet = wet;
     });
 
+    // Tink's turrets
+    this.syncMap(this.turretObjs, v.turrets ?? [], () => {
+      const obj = new THREE.Group();
+      const body = this.models.turret ? this.models.turret.clone(true) : new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.25, 0.5, 12), new THREE.MeshStandardMaterial({ color: '#b8913a' }));
+      body.scale.setScalar(1.3);
+      obj.add(body);
+      obj.userData.body = body;
+      this.scene.add(obj);
+      return { obj, yaw: null };
+    }, (o, tu) => {
+      o.obj.position.set(tu.x * U, 0, tu.y * U);
+      const target = Math.PI / 2 - tu.a;
+      o.yaw = o.yaw == null ? target : o.yaw + ((((target - o.yaw + Math.PI) % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) - Math.PI) * 0.25;
+      o.obj.userData.body.rotation.y = o.yaw;
+      o.h = tu.h / tu.m;
+      o.owner = tu.o;
+    });
+
     // Gems and the mine they come from
     this.gemMine.visible = v.mode === 'gemgrab';
     if (this.gemMine.visible) this.gemMine.userData.crystal.rotation.y = t * 0.6;
     this.syncMap(this.gemObjs, v.gems ?? [], () => {
       const obj = new THREE.Group();
-      const gem = new THREE.Mesh(this.gemGeo, this.gemMat);
+      const gem = this.models.gem ? this.models.gem.clone(true) : new THREE.Mesh(this.gemGeo, this.gemMat);
+      if (this.models.gem) { gem.scale.setScalar(0.95); gem.position.y = -0.3; }
       gem.castShadow = true;
       const glow = new THREE.Sprite(this.glowMat('g'));
       glow.scale.setScalar(0.9);
@@ -1786,7 +1860,7 @@ export class Renderer3D extends Renderer {
       g.fillRect(0, 0, 64, 8);
       this.streakTex = new THREE.CanvasTexture(c);
     }
-    const col = { b: '#fff3a8', p: '#ffb347', v: '#7fe9ff' }[kind] ?? '#ffffff';
+    const col = { b: '#fff3a8', p: '#ffb347', v: '#7fe9ff', w: '#7dffd0', j: '#c8ff6a' }[kind] ?? '#ffffff';
     const m = new THREE.MeshBasicMaterial({ map: this.streakTex, color: col, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
     m.userData.shared = true;
     this.streakMats[kind] = m;
@@ -1799,7 +1873,7 @@ export class Renderer3D extends Renderer {
     const c = document.createElement('canvas');
     c.width = c.height = 64;
     const g = c.getContext('2d');
-    const col = { b: '255,225,77', p: '255,138,0', v: '40,200,255', g: '190,110,255', o: '255,150,80', drink: '255,150,30', meteor: '255,110,30', heal: '110,240,170', gold: '255,210,80' }[kind];
+    const col = { b: '255,225,77', p: '255,138,0', v: '40,200,255', g: '190,110,255', o: '255,150,80', w: '110,255,200', j: '200,255,110', drink: '255,150,30', meteor: '255,110,30', heal: '110,240,170', gold: '255,210,80' }[kind];
     const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
     grd.addColorStop(0, `rgba(${col},0.9)`);
     grd.addColorStop(1, `rgba(${col},0)`);
@@ -1822,16 +1896,20 @@ export class Renderer3D extends Renderer {
       const mat = new THREE.MeshBasicMaterial({ color: a.super ? '#ffd63c' : '#ffffff', transparent: true, opacity: 0.28, depthWrite: false });
       const range = (a.super ? b.super.range : b.range) * U;
       const g = new THREE.Group();
-      if (kind === 'shotgun' || kind === 'volley' || kind === 'melee') {
+      if (kind === 'heal') {
+        // Healing Chorus covers a circle around you.
+        g.add(new THREE.Mesh(new THREE.CircleGeometry(range, 48).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: '#7dffb0', transparent: true, opacity: 0.22, depthWrite: false })));
+        g.add(new THREE.Mesh(new THREE.RingGeometry(range - 0.06, range, 48).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: '#7dffb0', transparent: true, opacity: 0.8, depthWrite: false })));
+      } else if (kind === 'shotgun' || kind === 'volley' || kind === 'melee' || kind === 'wave') {
         const spread = kind === 'volley' ? b.super.spread : kind === 'melee' ? b.arc * 2 : b.spread;
         g.add(new THREE.Mesh(new THREE.CircleGeometry(range, 32, -spread / 2, spread).rotateX(-Math.PI / 2), mat));
-      } else if (kind === 'bullet' || kind === 'charge') {
-        const w = (kind === 'charge' ? 52 : 18) * U;
+      } else if (kind === 'bullet' || kind === 'charge' || kind === 'lunge' || kind === 'bounce') {
+        const w = (kind === 'charge' || kind === 'lunge' ? 52 : 18) * U;
         const geo = new THREE.PlaneGeometry(range, w).rotateX(-Math.PI / 2).translate(range / 2, 0, 0);
         g.add(new THREE.Mesh(geo, mat));
       } else {
         // Thrower: exactly where it lands (full damage inside, half at the rim), plus a dotted path.
-        const blast = (a.super ? b.super.blast : b.blast) * U;
+        const blast = ((a.super ? b.super.blast : b.blast) ?? 34) * U; // turrets: footprint
         const land = new THREE.Group();
         land.add(new THREE.Mesh(new THREE.CircleGeometry(blast, 40).rotateX(-Math.PI / 2), mat));
         land.add(new THREE.Mesh(new THREE.CircleGeometry(blast * 0.5, 32).rotateX(-Math.PI / 2),
@@ -1856,7 +1934,10 @@ export class Renderer3D extends Renderer {
     }
     this.aimObj.visible = true;
     const x = a.x * U, z = a.y * U;
-    if (this.aimKind === 'lob' || this.aimKind === 'mega') {
+    if (this.aimKind === 'heal') {
+      this.aimObj.position.set(x, 0.07, z);
+      this.aimObj.rotation.y = 0;
+    } else if (this.aimKind === 'lob' || this.aimKind === 'mega' || this.aimKind === 'leap' || this.aimKind === 'turret') {
       const { land, dots, min } = this.aimObj.userData;
       const d = Math.min(this.aimRange, Math.max(min, a.dist * U));
       const c = Math.cos(a.angle), sn = Math.sin(a.angle);
@@ -1905,12 +1986,17 @@ export class Renderer3D extends Renderer {
         ctx.font = 'bold 12px system-ui';
         ctx.fillText(p.cubes, s.x + w / 2 + 15, s.y + 2);
       }
-      const badge = v.mode === 'gemgrab' && p.gems > 0 ? `💎 ${p.gems}` : v.mode === 'bounty' ? `⭐ ${p.stars ?? 2}` : '';
+      const badgeN = v.mode === 'gemgrab' && p.gems > 0 ? p.gems : v.mode === 'bounty' ? (p.stars ?? 2) : null;
+      const badge = badgeN != null ? String(badgeN) : '';
       if (badge) {
+        // Collectible icon (rendered in Blender) + count above the name.
+        const img = this.icons[v.mode === 'bounty' ? 'star' : 'gem'];
         ctx.font = '18px "Patrick Hand", system-ui';
-        ctx.strokeText(badge, s.x, s.y - 36);
+        const tw = ctx.measureText(badge).width;
+        if (img.complete && img.naturalWidth) ctx.drawImage(img, s.x - (tw + 24) / 2 - 2, s.y - 56, 26, 26);
+        ctx.strokeText(badge, s.x + 13, s.y - 36);
         ctx.fillStyle = v.mode === 'bounty' ? '#ffd56a' : '#e3b8ff';
-        ctx.fillText(badge, s.x, s.y - 36);
+        ctx.fillText(badge, s.x + 13, s.y - 36);
       }
       if (p.em != null) this.bubbleAt(s.x, s.y - (badge ? 56 : 36), EMOTES[p.em]);
       const sw = this.swaps.get(p.id);
@@ -1966,6 +2052,14 @@ export class Renderer3D extends Renderer {
       ctx.fillText(label, s.x, s.y);
       if (g.em != null) this.bubbleAt(s.x, s.y - 18, EMOTES[g.em]);
     }
+    for (const o of this.turretObjs.values()) {
+      const s = this.toScreen(null, o.obj.position.x / U, o.obj.position.z / U, 1.15);
+      const mine = o.owner === v.players.find((p) => p.isMe)?.id;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(s.x - 26, s.y - 4, 52, 8);
+      ctx.fillStyle = mine ? ME : this.teams && this.players.get(o.owner) && v.players.find((p) => p.id === o.owner)?.team === this.myTeam ? ALLY : FOE;
+      ctx.fillRect(s.x - 25, s.y - 3, 50 * Math.max(0, o.h), 6);
+    }
     for (const c of this.crateObjs.values()) {
       if (c.h >= 1) continue;
       const s = this.toScreen(null, c.obj.position.x / U, c.obj.position.z / U, 1.2);
@@ -1979,15 +2073,17 @@ export class Renderer3D extends Renderer {
     for (const f of this.floaters) {
       const k = (now - f.born) / 1000 / f.life;
       const s = this.toScreen(null, f.x, f.y, 2.0);
-      const text = f.k === 'dmg' ? `-${f.a}` : f.k === 'heal' ? `+${f.a}` : f.k === 'gem' ? '+1 💎' : '+1 ⚡';
+      const text = f.k === 'dmg' ? `-${f.a}` : f.k === 'heal' ? `+${f.a}` : '+1';
+      const fimg = f.k === 'gem' ? this.icons.gem : f.k === 'cube' ? this.icons.cube : null;
       ctx.font = `900 ${f.k === 'dmg' ? 20 : 18}px system-ui`;
       ctx.globalAlpha = 1 - k * k;
       ctx.lineWidth = 4;
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
       ctx.fillStyle = f.k === 'heal' ? '#7dffb0' : f.k === 'gem' ? '#e3b8ff' : f.k === 'cube' ? '#6dff9c' : f.src === 'poison' ? '#9dffa8' : f.src === 'haunt' ? '#cdb6ff' : '#ffdf5d';
       const x = s.x + ((f.id ?? 1) % 3 - 1) * 14, y = s.y - 20 - k * 40;
-      ctx.strokeText(text, x, y);
-      ctx.fillText(text, x, y);
+      ctx.strokeText(text, fimg ? x - 12 : x, y);
+      ctx.fillText(text, fimg ? x - 12 : x, y);
+      if (fimg?.complete && fimg.naturalWidth) ctx.drawImage(fimg, x + 2, y - 20, 26, 26);
       ctx.globalAlpha = 1;
     }
     this.touch = Boolean(v.sticks);

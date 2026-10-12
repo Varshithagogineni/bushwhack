@@ -2,7 +2,10 @@
   "characters": [
     "brick",
     "vex",
-    "boom"
+    "boom",
+    "melo",
+    "kit",
+    "tink"
   ],
   "props": [
     "wall0",
@@ -13,7 +16,10 @@
     "bush2",
     "crate",
     "cube",
-    "ghost"
+    "ghost",
+    "turret",
+    "gem",
+    "drink"
   ],
   "scenery": [
     "rock0",

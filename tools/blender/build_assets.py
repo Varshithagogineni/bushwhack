@@ -331,6 +331,9 @@ def build_body(c):
          rot=(0.12, 0, 0.12), bevel=0.012)
     straw = noise_mat('straw', '#c49c5e', '#e2c48a', 20, kind='straw')
     hb = hz + hr * 0.5
+    rig.update(hz=hz, hr=hr, tw=tw, glove=mask, tunic=tunic, straw=straw)
+    if not c.get('hat', True):
+        return rig
     prim('cone', 'hat', (0, 0, hb + c['hat_h'] / 2), (c['hat_r'], c['hat_r'], c['hat_h']), straw, upper, seg=32)
     prim('cyl', 'hatrim', (0, 0, hb), (c['hat_r'] * 1.01, c['hat_r'] * 1.01, 0.022), straw, upper, seg=32)
     prim('torus', 'hatband', (0, 0, hb + c['hat_h'] * 0.52), (c['hat_r'] * 0.5, c['hat_r'] * 0.5, 0.3),
@@ -405,7 +408,133 @@ def build_boom():
     return r
 
 
-CHARACTERS = {'brick': build_brick, 'vex': build_vex, 'boom': build_boom}
+def crescent(name, loc, radius, thick, m, parent, rot=(0, 0, 0)):
+    """A curved blade: an outer arc and an offset inner arc, extruded thin (in the XZ plane, edge facing +X)."""
+    bm = bmesh.new()
+    pts = []
+    n = 10
+    for i in range(n + 1):
+        a = -1.25 + 2.5 * i / n
+        pts.append((math.cos(a) * radius, math.sin(a) * radius))
+    for i in range(n + 1):
+        a = 1.05 - 2.1 * i / n
+        pts.append((radius * 0.22 + math.cos(a) * radius * 0.78, math.sin(a) * radius * 0.78))
+    face = bm.faces.new([bm.verts.new((x, 0, z)) for x, z in pts])
+    ext = bmesh.ops.extrude_face_region(bm, geom=[face])
+    for v in [g for g in ext['geom'] if isinstance(g, bmesh.types.BMVert)]:
+        v.co.y += thick
+    bmesh.ops.translate(bm, verts=bm.verts, vec=(0, -thick / 2, 0))
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    o = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(o)
+    o.location = loc
+    o.rotation_euler = rot
+    _finish(o, m, 0.006, False)
+    keep_parent(o, parent)
+    return o
+
+
+def build_melo():
+    """Support: a wandering lute player with a flower-trimmed hat. Heals with music."""
+    c = dict(id='melo', tunic='#6f9a5a', pants='#5a4636', scarf='#e08aa0', band='#e08aa0',
+             tunic_r=0.23, head_r=0.2, hat_r=0.44, hat_h=0.13, leg_r=0.064, tail=0.06)
+    r = build_body(c)
+    up, tw, hz, hr = r['upper'], r['tw'], r['hz'], r['hr']
+    # Flowers tucked around the hat brim.
+    hb = hz + hr * 0.5
+    petals = (mat('petalpink', '#f2a3b8', rough=0.5), mat('petalwhite', '#f6efe0', rough=0.5), mat('petalgold', '#f2c85b', rough=0.5))
+    for k in range(7):
+        a = -math.pi / 2 + (k - 3) * 0.42
+        rr = c['hat_r'] * 0.86
+        prim('sphere', f'flower{k}', (math.cos(a) * rr, math.sin(a) * rr, hb + 0.03), (0.045, 0.045, 0.03), petals[k % 3], up, seg=10, rings=6)
+    # Biwa lute held across the chest: pear body, sound hole, long neck, pegbox and strings.
+    wood = noise_mat('lutewood', '#9a6a3c', '#c08d57', 10, kind='wood')
+    dark = mat('lutedark', '#4a3020', rough=0.7)
+    body_c = (0.04, -0.27, 0.55)
+    prim('sphere', 'lutebody', body_c, (0.16, 0.05, 0.2), wood, up, rot=(0, -0.55, 0))
+    prim('cyl', 'lutehole', (0.06, -0.325, 0.57), (0.035, 0.035, 0.01), dark, up, rot=(math.pi / 2, 0, 0), seg=12)
+    neck_a, neck_b = (-0.06, -0.3, 0.7), (-0.3, -0.3, 1.02)
+    limb('luteneck', neck_a, neck_b, 0.025, wood, up)
+    prim('cube', 'pegbox', (-0.33, -0.3, 1.07), (0.06, 0.04, 0.1), dark, up, rot=(0, -0.55, 0), bevel=0.01)
+    for k in range(4):
+        prim('cyl', f'peg{k}', (-0.33 + (k % 2) * 0.05 - 0.025, -0.3, 1.04 + (k // 2) * 0.05), (0.008, 0.008, 0.06), dark, up, rot=(math.pi / 2, 0, 0), seg=8)
+    silk = mat('lutestring', '#f3ead2', rough=0.4)
+    for k in range(3):
+        o = (k - 1) * 0.012
+        limb(f'string{k}', (0.12 + o, -0.33, 0.45), (-0.3 + o, -0.33, 1.0), 0.003, silk, up, outline=0)
+    arm(r, 'armL', (tw + 0.02, 0, 0.66), (0.11, -0.36, 0.52), c)
+    arm(r, 'armR', (-tw - 0.02, 0, 0.66), (-0.22, -0.34, 0.9), c)
+    return r
+
+
+def build_kit():
+    """Assassin: a lean shadow in a pointed ninja hood with a long red scarf and twin kama."""
+    c = dict(id='kit', tunic='#3a3550', pants='#26222f', scarf='#c8433a', band='#c8433a',
+             tunic_r=0.2, head_r=0.19, hat=False, leg_r=0.06, tail=0.24)
+    r = build_body(c)
+    up, tw, hz, hr = r['upper'], r['tw'], r['hz'], r['hr']
+    hood = noise_mat('kithood', '#2b2638', '#3d3650', 30, kind='cloth')
+    # Hood sits a little back so the glowing eyes peek out; a drooping point trails behind.
+    dome('hood', (0, 0.07, hz + 0.01), (hr * 1.2, hr * 1.2, hr * 1.32), hood, up, cut=-0.25)
+    limb('hoodtip', (0, 0.16, hz + hr * 0.95), (0, 0.36, hz + hr * 0.55), 0.06, hood, up)
+    prim('sphere', 'hoodtipend', (0, 0.37, hz + hr * 0.52), (0.04, 0.04, 0.04), hood, up)
+    prim('torus', 'hoodtrim', (0, 0.0, hz - hr * 0.25), (hr * 1.15, hr * 1.1, 0.3), mat('kittrim', '#c8433a', rough=0.6), up, minor=0.12)
+    handle = noise_mat('kamahandle', '#5a3a22', '#7a5434', 10, kind='wood')
+    steel = mat('kamasteel', '#d6dde2', rough=0.22, metal=0.85, spec=0.8)
+    for side, sx in (('L', 1), ('R', -1)):
+        hand = (sx * (tw + 0.1), -0.12, 0.46)
+        arm(r, 'arm' + side, (sx * (tw + 0.02), 0, 0.66), hand, c)
+        top = (hand[0] + sx * 0.02, hand[1] - 0.16, hand[2] + 0.16)
+        limb('kama' + side, (hand[0], hand[1] + 0.04, hand[2] - 0.05), top, 0.018, handle, up)
+        # Crescent blade hooking forward from the top of the handle.
+        crescent('blade' + side, (top[0], top[1] - 0.12, top[2] + 0.03), 0.16, 0.022, steel, up, rot=(0.0, 0.0, -math.pi / 2 + sx * 0.25))
+    return r
+
+
+def build_tink():
+    """Builder: a tinkerer with brass goggles, a gear backpack, a big wrench and a spark orb."""
+    c = dict(id='tink', tunic='#d08a3a', pants='#3d4a63', scarf='#4a8fb8', band='#4a8fb8',
+             tunic_r=0.22, head_r=0.2, hat_r=0.38, hat_h=0.16, leg_r=0.064)
+    r = build_body(c)
+    up, tw, hz, hr = r['upper'], r['tw'], r['hz'], r['hr']
+    brass = mat('brass', '#b8913a', rough=0.35, metal=0.7, spec=0.6)
+    glass = mat('goggleglass', '#9fe3ff', rough=0.1, emit=0.8)
+    # Goggles pushed up onto the front slope of the hat, where the top-down camera sees them.
+    hb = hz + hr * 0.5
+    tilt = 0.75
+    for sx in (1, -1):
+        g = (0.085 * sx, -c['hat_r'] * 0.42, hb + c['hat_h'] * 0.55)
+        prim('torus', 'goggle', g, (0.065, 0.065, 0.065), brass, up, rot=(tilt, 0, 0), minor=0.25)
+        prim('cyl', 'lens', (g[0], g[1] - 0.004, g[2] + 0.004), (0.055, 0.055, 0.012), glass, up, rot=(tilt, 0, 0), seg=16)
+    limb('goggleband', (-0.03, -c['hat_r'] * 0.42, hb + c['hat_h'] * 0.55), (0.03, -c['hat_r'] * 0.42, hb + c['hat_h'] * 0.55), 0.015, brass, up)
+    # Backpack with a big brass gear.
+    pack = noise_mat('packleather', '#6b4a2e', '#86603d', 12, kind='wood')
+    prim('cube', 'pack', (0, 0.2, 0.62), (0.24, 0.12, 0.26), pack, up, bevel=0.02)
+    prim('cyl', 'gear', (0, 0.27, 0.68), (0.1, 0.1, 0.03), brass, up, rot=(math.pi / 2, 0, 0), seg=16)
+    for k in range(8):
+        a = k * math.pi / 4
+        prim('cube', f'tooth{k}', (math.cos(a) * 0.115, 0.27, 0.68 + math.sin(a) * 0.115), (0.03, 0.03, 0.03), brass, up, rot=(0, -a, 0), outline=0)
+    prim('cyl', 'chimney', (0.08, 0.2, 0.86), (0.025, 0.025, 0.12), mat('iron', '#4a4a50', rough=0.5, metal=0.6), up, seg=10)
+    # Wrench in the right hand.
+    iron = mat('wrenchsteel', '#9aa3aa', rough=0.3, metal=0.8)
+    hand = (-tw - 0.06, -0.1, 0.46)
+    arm(r, 'armR', (-tw - 0.02, 0, 0.66), hand, c)
+    wtop = (hand[0] - 0.02, hand[1] - 0.2, hand[2] + 0.24)
+    limb('wrench', (hand[0], hand[1] + 0.03, hand[2] - 0.06), wtop, 0.024, iron, up)
+    # Open-jaw head: a block with two prongs.
+    prim('cube', 'wrenchhead', (wtop[0], wtop[1] - 0.02, wtop[2] + 0.04), (0.16, 0.06, 0.07), iron, up, rot=(0.6, 0, 0), bevel=0.012)
+    for px in (-0.055, 0.055):
+        prim('cube', 'wrenchjaw', (wtop[0] + px, wtop[1] - 0.06, wtop[2] + 0.1), (0.045, 0.05, 0.11), iron, up, rot=(0.6, 0, 0), bevel=0.01)
+    # Crackling spark orb in the left hand.
+    lhand = (tw + 0.04, -0.3, 0.62)
+    arm(r, 'armL', (tw + 0.02, 0, 0.66), lhand, c)
+    prim('ico', 'orb', (lhand[0], lhand[1] - 0.05, lhand[2] + 0.08), (0.075, 0.075, 0.075), mat('sparkorb', '#b8ff6a', emit=3.5, rough=0.2), up, sub=2)
+    return r
+
+
+CHARACTERS = {'brick': build_brick, 'vex': build_vex, 'boom': build_boom, 'melo': build_melo, 'kit': build_kit, 'tink': build_tink}
 
 
 def set_pose(r, frame):
@@ -469,7 +598,10 @@ def save_array(arr, path, fmt='WEBP', quality=90):
 
 def render_characters(manifest):
     cell, anchor = 224, (112, 178)
+    only = [c for c in CHARACTERS if c in ONLY]
     for cid, build in CHARACTERS.items():
+        if only and cid not in only:
+            continue
         reset_scene(samples=32)
         r = build()
         r['root'].scale = (CHAR_SCALE,) * 3
@@ -580,6 +712,107 @@ def build_cube():
     prim('cube', 'core', (0, -0.05, 0.31), (0.12, 0.12, 0.12), mat('cubecore', '#eaffdf', emit=4), root,
          rot=(0.62, 0.62, 0.2), outline=0, smooth=False)
     return root
+
+
+def build_turret():
+    """Tink's turret: a brass drum on a wooden tripod with a stubby barrel and a glowing eye. Faces -Y."""
+    root = empty('turret')
+    wood = noise_mat('turretwood', '#6e4a2c', '#8f6a45', 10, kind='wood')
+    brass = mat('brass', '#b8913a', rough=0.35, metal=0.7, spec=0.6)
+    for k in range(3):
+        a = k * 2 * math.pi / 3 + math.pi / 2
+        limb(f'leg{k}', (0, 0, 0.36), (math.cos(a) * 0.3, math.sin(a) * 0.3, 0.0), 0.03, wood, root)
+    prim('cyl', 'drum', (0, 0, 0.46), (0.17, 0.17, 0.18), brass, root, seg=20)
+    prim('sphere', 'dome', (0, 0, 0.56), (0.15, 0.15, 0.09), brass, root)
+    for z in (0.39, 0.53):
+        prim('torus', 'rivetband', (0, 0, z), (0.172, 0.172, 0.172), mat('iron', '#4a4a50', rough=0.5, metal=0.6), root, minor=0.08)
+    limb('barrel', (0, -0.12, 0.47), (0, -0.42, 0.49), 0.045, mat('iron', '#4a4a50'), root)
+    prim('cyl', 'muzzle', (0, -0.43, 0.49), (0.06, 0.06, 0.04), brass, root, rot=(math.pi / 2, 0, 0), seg=14)
+    prim('sphere', 'eye', (0, -0.15, 0.58), (0.045, 0.03, 0.035), mat('sparkorb', '#b8ff6a', emit=3.5, rough=0.2), root, seg=12, rings=8)
+    return root
+
+
+def build_gem():
+    """Gem Grab crystal: a tall faceted amethyst with a bright core."""
+    root = empty('gem')
+    bpy.ops.mesh.primitive_cone_add(vertices=8, radius1=0.2, radius2=0.0, depth=0.26, location=(0, 0, 0.53))
+    top = bpy.context.active_object
+    _finish(top, mat('gemcrystal', '#b56cf0', rough=0.12, emit=0.9, spec=0.8), 0.01, False)
+    keep_parent(top, root)
+    bpy.ops.mesh.primitive_cone_add(vertices=8, radius1=0.2, radius2=0.0, depth=0.4, location=(0, 0, 0.2), rotation=(math.pi, 0, 0))
+    bot = bpy.context.active_object
+    _finish(bot, mat('gemcrystal', '#b56cf0'), 0.01, False)
+    keep_parent(bot, root)
+    prim('ico', 'gemcore', (0, 0, 0.4), (0.07, 0.07, 0.07), mat('gemcore', '#f3dcff', emit=3.0), root, outline=0, sub=1)
+    return root
+
+
+def build_star():
+    """Bounty star: a chunky, bevelled golden five-point star standing upright."""
+    root = empty('star')
+    bm = bmesh.new()
+    pts = []
+    for k in range(10):
+        a = math.pi / 2 + k * math.pi / 5
+        rr = 0.3 if k % 2 == 0 else 0.13
+        pts.append(bm.verts.new((math.cos(a) * rr, 0, math.sin(a) * rr)))
+    face = bm.faces.new(pts)
+    ext = bmesh.ops.extrude_face_region(bm, geom=[face])
+    for v in [g for g in ext['geom'] if isinstance(g, bmesh.types.BMVert)]:
+        v.co.y += 0.09
+    bmesh.ops.translate(bm, verts=bm.verts, vec=(0, -0.045, 0.34))
+    me = bpy.data.meshes.new('star')
+    bm.to_mesh(me)
+    bm.free()
+    o = bpy.data.objects.new('star', me)
+    bpy.context.scene.collection.objects.link(o)
+    _finish(o, mat('stargold', '#f2c13a', rough=0.25, metal=0.6, emit=0.35, spec=0.7), 0.01, False, bevel=0.025)
+    keep_parent(o, root)
+    return root
+
+
+def build_drink():
+    """Energy Drink: an orange can with a cream band and a lightning stripe."""
+    root = empty('drink')
+    prim('cyl', 'can', (0, 0, 0.26), (0.13, 0.13, 0.42), mat('canorange', '#ff8a1f', rough=0.3, metal=0.4, emit=0.25), root, seg=24, bevel=0.01)
+    prim('cyl', 'band', (0, 0, 0.27), (0.133, 0.133, 0.12), mat('canband', '#fff1b0', rough=0.4), root, seg=24)
+    prim('cyl', 'lid', (0, 0, 0.485), (0.115, 0.115, 0.03), mat('canlid', '#c9c9c9', rough=0.3, metal=0.8), root, seg=24)
+    # Zig-zag bolt across the band.
+    bolt = mat('canbolt', '#ff5a1f', rough=0.4, emit=0.4)
+    for k, (z0, z1, x0, x1) in enumerate(((0.36, 0.28, -0.03, 0.02), (0.28, 0.26, 0.02, -0.02), (0.26, 0.17, -0.02, 0.03))):
+        limb(f'bolt{k}', (x0, -0.135, z0), (x1, -0.135, z1), 0.014, bolt, root, outline=0)
+    return root
+
+
+def build_trophy():
+    """Trophy cup for the trophy counter."""
+    root = empty('trophy')
+    gold = mat('trophygold', '#e8b53a', rough=0.25, metal=0.8, spec=0.7)
+    prim('cone', 'cup', (0, 0, 0.47), (0.2, 0.2, 0.26), gold, root, rot=(math.pi, 0, 0), r2=0.45, seg=24)
+    prim('cyl', 'rim', (0, 0, 0.6), (0.205, 0.205, 0.02), gold, root, seg=24)
+    for sx in (1, -1):
+        prim('torus', 'handle', (sx * 0.2, 0, 0.48), (0.08, 0.08, 0.08), gold, root, rot=(math.pi / 2, 0, 0), minor=0.22)
+    limb('stem', (0, 0, 0.34), (0, 0, 0.16), 0.03, gold, root)
+    prim('cube', 'base', (0, 0, 0.1), (0.24, 0.18, 0.12), noise_mat('trophybase', '#5a3a22', '#7a5434', 10, kind='wood'), root, bevel=0.015)
+    return root
+
+
+ICONS = {'gem': build_gem, 'star': build_star, 'cube': None, 'drink': build_drink, 'trophy': build_trophy}
+
+
+def render_icons(manifest):
+    """Square, transparent icons of the collectibles for the HUD (replacing emoji)."""
+    os.makedirs(os.path.join(OUT, 'icons'), exist_ok=True)
+    icons = {}
+    for name, build in ICONS.items():
+        reset_scene(samples=64)
+        root = (build or build_cube)()
+        # Turn props a little so they read as 3D, then frame them.
+        root.rotation_euler.z = {'star': 0.35, 'cube': 0.0, 'drink': -0.4, 'trophy': -0.3, 'gem': 0.3}[name]
+        ortho_camera((0, 0, 0.36), (64, 70), (128, 128), 150, math.radians(22))
+        save_array(render_to_array(128, 128), os.path.join(OUT, 'icons', f'{name}.png'), fmt='PNG')
+        icons[name] = f'icons/{name}.png'
+    manifest['icons'] = icons
 
 
 def build_ghost():
@@ -947,8 +1180,8 @@ def render_hero(manifest):
 manifest_path = os.path.join(OUT, 'manifest.json')
 manifest = json.load(open(manifest_path)) if os.path.exists(manifest_path) else {}
 manifest.setdefault('characters', {})
-for stage, fn in (('chars', render_characters), ('props', render_props), ('ground', render_ground), ('hero', render_hero)):
-    if stage in ONLY:
+for stage, fn in (('chars', render_characters), ('props', render_props), ('ground', render_ground), ('hero', render_hero), ('icons', render_icons)):
+    if stage in ONLY or (stage == 'chars' and any(c in ONLY for c in CHARACTERS)):
         fn(manifest)
         json.dump(manifest, open(manifest_path, 'w'), indent=2)
 print('MANIFEST', json.dumps(manifest))
