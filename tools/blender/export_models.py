@@ -525,8 +525,16 @@ def bake_ground(manifest):
 
 def run(manifest):
     jobs = []
+    # Characters are exported rigged and animated by rig.py (skeleton, skin weights, clips, baked AO).
+    rig_ns = dict(globals(), CHARACTERS_=L['CHARACTERS'])
+    exec(compile(open(os.path.join(HERE, 'rig.py')).read(), 'rig.py', 'exec'), rig_ns)
     for cid in ('brick', 'vex', 'boom', 'melo', 'kit', 'tink'):
-        jobs.append((cid, lambda cid=cid: L['CHARACTERS'][cid](), False, 'characters'))
+        if ONLY and cid not in ONLY and 'characters' not in ONLY:
+            continue
+        rig_ns['export_rigged'](cid, OUT)
+        manifest.setdefault('characters', [])
+        if cid not in manifest['characters']:
+            manifest['characters'].append(cid)
     for v in range(3):
         jobs.append((f'wall{v}', lambda v=v: L['build_wall'](v, stretch=False), True, 'props'))
         jobs.append((f'bush{v}', lambda v=v: L['build_bush'](v, stretch=False), True, 'props'))
